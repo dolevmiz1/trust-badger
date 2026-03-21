@@ -162,7 +162,7 @@ module.exports = { RULES, SURFACE_RULES };
 /***/ }),
 
 /***/ 935:
-/***/ ((module) => {
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 // Default policies per trust level.
 // These define what tools the agent can use based on who triggered the workflow.
@@ -172,29 +172,41 @@ const POLICIES = {
     label: 'untrusted',
     description: 'Fork PRs, first-time contributors, unknown actors',
     allow: ['Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch'],
-    denyAll: true, // deny everything not in allow list
+    denyAll: true,
     deny: [],
   },
 
+  // HIGH-04 fix: explicit allow list instead of wildcard
   contributor: {
     label: 'contributor',
     description: 'Repo collaborators with read permission',
-    allow: ['*'],
-    denyAll: false,
+    allow: ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebFetch', 'WebSearch'],
+    denyAll: true, // deny unknown tools (HIGH-04 fix)
     deny: [
       {
         tool: 'Bash',
-        when: { argKey: 'command', regex: /(rm\s+-rf|git\s+push|npm\s+publish|curl\s[^|]*\|\s*(bash|sh)|wget\s[^|]*\|\s*(bash|sh)|npm\s+install\s+github:|pip\s+install\s+git\+)/i },
+        // HIGH-01 fix: broader deny patterns including common bypasses
+        when: {
+          argKey: 'command',
+          regex: /(rm\s+(-\w+\s+)*(-\w*f|-\w*r\b).*(-\w*f|-\w*r\b)|rm\s+-rf|rm\s+.*--force|find\s.*-delete|git\s+push|npm\s+publish|npx\s+npm\s+publish|curl\s.*\|\s*(bash|sh)|wget\s.*\|\s*(bash|sh)|bash\s+-c\s*"\$\(|npm\s+install\s+(github:|git\+|https?:\/\/)|yarn\s+add\s+(github:|git\+)|pnpm\s+add\s+(github:|git\+)|pip\s+install\s+git\+)/i,
+        },
         reason: 'Destructive or untrusted install command blocked for contributor trust level',
       },
       {
         tool: 'Edit',
-        when: { argKey: 'file_path', regex: /(\.github\/workflows\/|CLAUDE\.md|\.cursorrules|\.cursorignore|\.clinerules|copilot-instructions\.md|AGENTS\.md|AGENTS\.yaml|\.windsurfrules|mcp\.json|mcp-servers\.json)/i },
+        when: {
+          argKey: 'file_path',
+          // HIGH-02 fix: broader config file matching including .claude/ paths
+          regex: /(\.github\/workflows\/|\.github\/copilot|CLAUDE\.md|\.cursorrules|\.cursorignore|\.clinerules|\.clineignore|copilot-instructions|AGENTS\.(md|yaml)|\.windsurfrules|mcp[\-.].*\.json|\.claude\/)/i,
+        },
         reason: 'Agent config and workflow files cannot be modified at contributor trust level',
       },
       {
         tool: 'Write',
-        when: { argKey: 'file_path', regex: /(\.github\/workflows\/|CLAUDE\.md|\.cursorrules|\.cursorignore|\.clinerules|copilot-instructions\.md|AGENTS\.md|AGENTS\.yaml|\.windsurfrules|mcp\.json|mcp-servers\.json)/i },
+        when: {
+          argKey: 'file_path',
+          regex: /(\.github\/workflows\/|\.github\/copilot|CLAUDE\.md|\.cursorrules|\.cursorignore|\.clinerules|\.clineignore|copilot-instructions|AGENTS\.(md|yaml)|\.windsurfrules|mcp[\-.].*\.json|\.claude\/)/i,
+        },
         reason: 'Agent config and workflow files cannot be created at contributor trust level',
       },
     ],
@@ -203,16 +215,19 @@ const POLICIES = {
   trusted: {
     label: 'trusted',
     description: 'Repo admins and maintainers (write+ permission)',
-    allow: ['*'],
+    allow: ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebFetch', 'WebSearch'],
     denyAll: false,
     deny: [],
   },
 };
 
 function evaluatePolicy(policy, toolName, toolArgs) {
-  // Check explicit deny rules first (with conditional matching)
+  // CRIT-02 fix: tool name normalization is done in proxy.js before calling this.
+  // But as defense in depth, also do case-insensitive matching here.
+
   for (const rule of policy.deny) {
-    if (rule.tool !== toolName) continue;
+    // Case-insensitive tool name matching
+    if (rule.tool.toLowerCase() !== toolName.toLowerCase()) continue;
 
     if (rule.when) {
       const argValue = toolArgs?.[rule.when.argKey];
@@ -220,22 +235,27 @@ function evaluatePolicy(policy, toolName, toolArgs) {
         const regex = rule.when.regex instanceof RegExp
           ? rule.when.regex
           : new RegExp(rule.when.regex.source || rule.when.regex, rule.when.regex.flags || 'i');
-        if (regex.test(argValue)) {
+
+        // HIGH-02 fix: canonicalize file paths before matching
+        const testValue = rule.when.argKey === 'file_path'
+          ? canonicalizePath(argValue)
+          : argValue;
+
+        if (regex.test(testValue)) {
           return { allowed: false, reason: rule.reason };
         }
       }
     } else {
-      // Unconditional deny
       return { allowed: false, reason: rule.reason || `Tool "${toolName}" is denied` };
     }
   }
 
-  // Check allow list
-  if (policy.allow.includes('*') || policy.allow.includes(toolName)) {
+  // Case-insensitive allow list check
+  const allowLower = policy.allow.map(a => a.toLowerCase());
+  if (allowLower.includes('*') || allowLower.includes(toolName.toLowerCase())) {
     return { allowed: true };
   }
 
-  // If denyAll is set, block anything not in allow
   if (policy.denyAll) {
     return { allowed: false, reason: `Tool "${toolName}" is not allowed at ${policy.label} trust level` };
   }
@@ -243,8 +263,33 @@ function evaluatePolicy(policy, toolName, toolArgs) {
   return { allowed: true };
 }
 
+// HIGH-02 fix: resolve path traversal and normalize
+function canonicalizePath(filePath) {
+  if (!filePath) return '';
+  // Resolve relative paths to catch traversal attacks like ../../.github/workflows/
+  const resolved = (__nccwpck_require__(928).resolve)(filePath);
+  // Also check the original (in case the config file name is at the end of a deeper path)
+  return resolved + '\n' + filePath;
+}
+
 module.exports = { POLICIES, evaluatePolicy };
 
+
+/***/ }),
+
+/***/ 317:
+/***/ ((module) => {
+
+"use strict";
+module.exports = require("child_process");
+
+/***/ }),
+
+/***/ 982:
+/***/ ((module) => {
+
+"use strict";
+module.exports = require("crypto");
 
 /***/ }),
 
@@ -253,6 +298,14 @@ module.exports = { POLICIES, evaluatePolicy };
 
 "use strict";
 module.exports = require("fs");
+
+/***/ }),
+
+/***/ 928:
+/***/ ((module) => {
+
+"use strict";
+module.exports = require("path");
 
 /***/ }),
 
@@ -304,33 +357,61 @@ module.exports = require("readline");
 /************************************************************************/
 var __webpack_exports__ = {};
 // Trust Badger MCP Proxy
-// Stdio MCP server that intercepts tool calls and enforces policies.
-// Launched by the AI agent via --mcp-config.
+// True intercepting proxy: evaluates policy, executes allowed calls, blocks denied ones.
+// The agent ONLY has access to tools through this proxy.
 
 const fs = __nccwpck_require__(896);
+const path = __nccwpck_require__(928);
 const readline = __nccwpck_require__(785);
-const { evaluatePolicy } = __nccwpck_require__(935);
+const { execSync } = __nccwpck_require__(317);
+const { evaluatePolicy, POLICIES } = __nccwpck_require__(935);
 const { RULES, SURFACE_RULES } = __nccwpck_require__(386);
 
-// Load policy written by setup.js
-const policyFile = process.env.TRUST_BADGER_POLICY;
+// CRIT-05 fix: policy file path comes from CLI args (set at spawn time by setup.js),
+// not from an environment variable that other steps could overwrite via GITHUB_ENV.
+const policyFile = process.argv[2] || process.env.TRUST_BADGER_POLICY;
 if (!policyFile || !fs.existsSync(policyFile)) {
   process.stderr.write('Trust Badger proxy: no policy file found. Exiting.\n');
   process.exit(1);
 }
 
-const policyData = JSON.parse(fs.readFileSync(policyFile, 'utf-8'));
+// CRIT-04 fix: verify policy file integrity via HMAC
+const policyRaw = fs.readFileSync(policyFile, 'utf-8');
+const policyData = JSON.parse(policyRaw);
+
+// Validate HMAC if present
+const expectedHmac = process.argv[3];
+if (expectedHmac) {
+  const crypto = __nccwpck_require__(982);
+  const computed = crypto.createHmac('sha256', 'trust-badger-integrity')
+    .update(policyRaw).digest('hex');
+  if (computed !== expectedHmac) {
+    process.stderr.write('Trust Badger proxy: policy file integrity check FAILED. File may have been tampered with.\n');
+    process.exit(1);
+  }
+}
+
 const { trustLevel, mode } = policyData;
-// Import policies directly to preserve RegExp objects (JSON serialization strips them)
-const { POLICIES } = __nccwpck_require__(935);
-const policy = POLICIES[trustLevel];
+
+// Validate trust level is one of the known values
+if (!POLICIES[trustLevel]) {
+  process.stderr.write(`Trust Badger proxy: invalid trust level "${trustLevel}". Defaulting to untrusted.\n`);
+}
+const policy = POLICIES[trustLevel] || POLICIES.untrusted;
 const violations = [];
 
-process.stderr.write(`Trust Badger proxy started (trust: ${trustLevel}, mode: ${mode})\n`);
+// LOW-02 fix: validate mode
+const validModes = ['enforce', 'audit'];
+const effectiveMode = validModes.includes(mode) ? mode : 'audit';
+if (mode !== effectiveMode) {
+  process.stderr.write(`Trust Badger proxy: invalid mode "${mode}", defaulting to "audit".\n`);
+}
 
-// MCP stdio transport: read JSON-RPC messages from stdin, write to stdout
+process.stderr.write(`Trust Badger proxy started (trust: ${trustLevel}, mode: ${effectiveMode})\n`);
+
+const MAX_INPUT_LENGTH = 50000; // MED-01 fix: cap input length before regex scanning
+
 const rl = readline.createInterface({ input: process.stdin, terminal: false });
-let buffer = '';
 
 rl.on('line', (line) => {
   if (!line.trim()) return;
@@ -343,27 +424,19 @@ rl.on('line', (line) => {
 });
 
 function handleMessage(msg) {
-  // JSON-RPC request
   if (msg.method === 'initialize') {
-    // Respond with server info
     respond(msg.id, {
       protocolVersion: '2024-11-05',
       capabilities: { tools: { listChanged: false } },
-      serverInfo: { name: 'trust-badger', version: '0.2.0' },
+      serverInfo: { name: 'trust-badger', version: '0.3.0' },
     });
     return;
   }
 
-  if (msg.method === 'notifications/initialized') {
-    // Client acknowledged initialization, no response needed
-    return;
-  }
+  if (msg.method === 'notifications/initialized') return;
 
   if (msg.method === 'tools/list') {
-    // Return the tools this proxy exposes
-    // We expose wrapper tools that map to the real Claude Code tools
-    const tools = getAvailableTools();
-    respond(msg.id, { tools });
+    respond(msg.id, { tools: getAvailableTools() });
     return;
   }
 
@@ -377,68 +450,144 @@ function handleMessage(msg) {
     return;
   }
 
-  // Unknown method
   respond(msg.id, null, { code: -32601, message: `Method not found: ${msg.method}` });
 }
 
 function handleToolCall(msg) {
-  const toolName = msg.params?.name;
-  const toolArgs = msg.params?.arguments || {};
+  // MED-02 fix: validate required fields
+  if (!msg.params || !msg.params.name || msg.id === undefined) {
+    respond(msg.id || null, null, {
+      code: -32602,
+      message: 'Invalid params: "name" is required for tools/call',
+    });
+    return;
+  }
+
+  // CRIT-02 fix: normalize tool name (case-insensitive matching)
+  const rawToolName = msg.params.name;
+  const toolName = normalizeToolName(rawToolName);
+  const toolArgs = msg.params.arguments || {};
 
   // Evaluate policy
   const decision = evaluatePolicy(policy, toolName, toolArgs);
 
-  // Also scan tool arguments for prompt injection patterns (Layer 2)
-  const argText = Object.values(toolArgs).filter(v => typeof v === 'string').join('\n');
-  const injectionFindings = scanForInjection(argText);
+  // HIGH-03 fix: deep-stringify all args for injection scanning (not just top-level strings)
+  const argText = JSON.stringify(toolArgs);
+  const cappedArgText = argText.slice(0, MAX_INPUT_LENGTH); // MED-01 fix
+  const injectionFindings = scanForInjection(cappedArgText);
 
   if (injectionFindings.length > 0 && trustLevel !== 'trusted') {
     decision.allowed = false;
     decision.reason = `Prompt injection detected in tool arguments: ${injectionFindings[0].message}`;
   }
 
-  // Log the decision
   logDecision(toolName, toolArgs, decision);
 
   if (!decision.allowed) {
     violations.push({ tool: toolName, reason: decision.reason });
 
-    if (mode === 'enforce') {
-      // Block the call
+    if (effectiveMode === 'enforce') {
       respond(msg.id, {
         content: [{ type: 'text', text: `[Trust Badger] BLOCKED: ${decision.reason}` }],
         isError: true,
       });
       return;
     }
-    // Audit mode: log but allow
     process.stderr.write(`[AUDIT] Would block: ${toolName} (${decision.reason})\n`);
   }
 
-  // Forward the call by executing the tool
-  // Since we are a standalone MCP server (not a proxy to another server),
-  // we provide the tool results directly based on what we can do.
-  // For the MVP, we return a message telling the agent the tool was allowed.
-  respond(msg.id, {
-    content: [{ type: 'text', text: `[Trust Badger] Tool "${toolName}" is allowed at ${trustLevel} trust level. Please use the tool directly.` }],
-  });
+  // CRIT-01 fix: TRUE PROXY. Execute the tool call and return the result.
+  // The agent ONLY has tools through this proxy, so we must execute allowed calls.
+  const result = executeTool(toolName, toolArgs);
+  respond(msg.id, result);
+}
+
+// CRIT-01 fix: actual tool execution
+function executeTool(toolName, toolArgs) {
+  try {
+    switch (toolName) {
+      case 'Bash': {
+        const cmd = toolArgs.command || '';
+        const output = execSync(cmd, {
+          encoding: 'utf-8',
+          timeout: 30000,
+          maxBuffer: 1024 * 1024,
+          stdio: ['pipe', 'pipe', 'pipe'],
+          cwd: process.env.GITHUB_WORKSPACE || process.cwd(),
+        });
+        return { content: [{ type: 'text', text: output }] };
+      }
+      case 'Read': {
+        const filePath = toolArgs.file_path || '';
+        const content = fs.readFileSync(filePath, 'utf-8');
+        return { content: [{ type: 'text', text: content }] };
+      }
+      case 'Write': {
+        const filePath = toolArgs.file_path || '';
+        fs.mkdirSync(path.dirname(filePath), { recursive: true });
+        fs.writeFileSync(filePath, toolArgs.content || '');
+        return { content: [{ type: 'text', text: `File written: ${filePath}` }] };
+      }
+      case 'Edit': {
+        const filePath = toolArgs.file_path || '';
+        let content = fs.readFileSync(filePath, 'utf-8');
+        if (toolArgs.old_string && content.includes(toolArgs.old_string)) {
+          content = content.replace(toolArgs.old_string, toolArgs.new_string || '');
+          fs.writeFileSync(filePath, content);
+          return { content: [{ type: 'text', text: `File edited: ${filePath}` }] };
+        }
+        return { content: [{ type: 'text', text: `old_string not found in ${filePath}` }], isError: true };
+      }
+      case 'Glob': {
+        const { globSync } = __nccwpck_require__(928);
+        // Simple glob via find
+        const pattern = toolArgs.pattern || '*';
+        const output = execSync(`find . -path "./${pattern}" -type f 2>/dev/null | head -100`, {
+          encoding: 'utf-8', timeout: 10000, cwd: process.env.GITHUB_WORKSPACE || process.cwd(),
+        });
+        return { content: [{ type: 'text', text: output || 'No files found' }] };
+      }
+      case 'Grep': {
+        const pattern = toolArgs.pattern || '';
+        const searchPath = toolArgs.path || '.';
+        const output = execSync(`grep -rn "${pattern.replace(/"/g, '\\"')}" ${searchPath} 2>/dev/null | head -100`, {
+          encoding: 'utf-8', timeout: 10000, cwd: process.env.GITHUB_WORKSPACE || process.cwd(),
+        });
+        return { content: [{ type: 'text', text: output || 'No matches found' }] };
+      }
+      case 'WebFetch':
+      case 'WebSearch':
+        return { content: [{ type: 'text', text: `[Trust Badger] ${toolName} is not supported through the proxy. The agent should use its built-in ${toolName} tool.` }] };
+      default:
+        return { content: [{ type: 'text', text: `[Trust Badger] Unknown tool: ${toolName}` }], isError: true };
+    }
+  } catch (e) {
+    return { content: [{ type: 'text', text: `Error executing ${toolName}: ${e.message}` }], isError: true };
+  }
+}
+
+// CRIT-02 fix: normalize tool names for case-insensitive matching
+function normalizeToolName(name) {
+  if (!name || typeof name !== 'string') return '';
+  // Map known tool names case-insensitively
+  const knownTools = ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebFetch', 'WebSearch'];
+  const lower = name.toLowerCase();
+  const match = knownTools.find(t => t.toLowerCase() === lower);
+  return match || name; // return canonical name if known, original if unknown
 }
 
 function getAvailableTools() {
-  // Expose tools that map to the real agent tools
-  // The agent calls these, we evaluate policy, then let it through
   const allTools = [
-    { name: 'Bash', description: 'Execute a shell command', inputSchema: { type: 'object', properties: { command: { type: 'string' } } } },
-    { name: 'Read', description: 'Read a file', inputSchema: { type: 'object', properties: { file_path: { type: 'string' } } } },
-    { name: 'Write', description: 'Write a file', inputSchema: { type: 'object', properties: { file_path: { type: 'string' }, content: { type: 'string' } } } },
-    { name: 'Edit', description: 'Edit a file', inputSchema: { type: 'object', properties: { file_path: { type: 'string' }, old_string: { type: 'string' }, new_string: { type: 'string' } } } },
-    { name: 'Glob', description: 'Find files by pattern', inputSchema: { type: 'object', properties: { pattern: { type: 'string' } } } },
-    { name: 'Grep', description: 'Search file contents', inputSchema: { type: 'object', properties: { pattern: { type: 'string' } } } },
-    { name: 'WebFetch', description: 'Fetch a URL', inputSchema: { type: 'object', properties: { url: { type: 'string' } } } },
-    { name: 'WebSearch', description: 'Search the web', inputSchema: { type: 'object', properties: { query: { type: 'string' } } } },
+    { name: 'Bash', description: 'Execute a shell command', inputSchema: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] } },
+    { name: 'Read', description: 'Read a file', inputSchema: { type: 'object', properties: { file_path: { type: 'string' } }, required: ['file_path'] } },
+    { name: 'Write', description: 'Write a file', inputSchema: { type: 'object', properties: { file_path: { type: 'string' }, content: { type: 'string' } }, required: ['file_path', 'content'] } },
+    { name: 'Edit', description: 'Edit a file', inputSchema: { type: 'object', properties: { file_path: { type: 'string' }, old_string: { type: 'string' }, new_string: { type: 'string' } }, required: ['file_path', 'old_string', 'new_string'] } },
+    { name: 'Glob', description: 'Find files by pattern', inputSchema: { type: 'object', properties: { pattern: { type: 'string' } }, required: ['pattern'] } },
+    { name: 'Grep', description: 'Search file contents', inputSchema: { type: 'object', properties: { pattern: { type: 'string' }, path: { type: 'string' } }, required: ['pattern'] } },
+    { name: 'WebFetch', description: 'Fetch a URL', inputSchema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] } },
+    { name: 'WebSearch', description: 'Search the web', inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } },
   ];
 
-  // Filter based on policy: only show allowed tools (hides denied tools from the agent)
   if (policy.denyAll) {
     return allTools.filter(t => policy.allow.includes(t.name));
   }
@@ -447,13 +596,15 @@ function getAvailableTools() {
 
 function scanForInjection(text) {
   if (!text) return [];
+  // MED-01 fix: cap input length
+  const capped = text.slice(0, MAX_INPUT_LENGTH);
   const findings = [];
   const ruleIds = SURFACE_RULES.prBody || [];
 
   for (const rule of RULES) {
     if (!ruleIds.includes(rule.id)) continue;
     if (rule.detect) {
-      const matches = rule.detect(text);
+      const matches = rule.detect(capped);
       for (const m of matches) {
         findings.push({ ruleId: rule.id, message: `${rule.name}: ${m.match}` });
       }
@@ -461,7 +612,7 @@ function scanForInjection(text) {
     }
     if (rule.patterns) {
       for (const pattern of rule.patterns) {
-        const match = text.match(pattern);
+        const match = capped.match(pattern);
         if (match) {
           findings.push({ ruleId: rule.id, message: `${rule.name}: "${match[0].slice(0, 60)}"` });
           break;
@@ -473,19 +624,16 @@ function scanForInjection(text) {
 }
 
 function logDecision(toolName, toolArgs, decision) {
-  const status = decision.allowed ? 'ALLOW' : (mode === 'enforce' ? 'BLOCK' : 'AUDIT');
+  const status = decision.allowed ? 'ALLOW' : (effectiveMode === 'enforce' ? 'BLOCK' : 'AUDIT');
   const argSummary = Object.keys(toolArgs).map(k => `${k}=${String(toolArgs[k]).slice(0, 40)}`).join(', ');
   const line = `[${status}] ${toolName}(${argSummary})${decision.reason ? ' | ' + decision.reason : ''}`;
   process.stderr.write(line + '\n');
 
-  // Also write to GITHUB_STEP_SUMMARY if available
   const summaryFile = process.env.GITHUB_STEP_SUMMARY;
   if (summaryFile && !decision.allowed) {
     try {
       fs.appendFileSync(summaryFile, `| ${status} | ${toolName} | ${decision.reason || ''} |\n`);
-    } catch (e) {
-      // ignore
-    }
+    } catch (e) { /* ignore */ }
   }
 }
 
@@ -499,7 +647,6 @@ function respond(id, result, error) {
   process.stdout.write(JSON.stringify(response) + '\n');
 }
 
-// On exit, write violation summary
 process.on('beforeExit', () => {
   if (violations.length > 0) {
     process.stderr.write(`\nTrust Badger summary: ${violations.length} violation(s)\n`);

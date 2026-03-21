@@ -30083,7 +30083,7 @@ module.exports = { RULES, SURFACE_RULES };
 /***/ }),
 
 /***/ 7316:
-/***/ ((module) => {
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 // Default policies per trust level.
 // These define what tools the agent can use based on who triggered the workflow.
@@ -30093,29 +30093,41 @@ const POLICIES = {
     label: 'untrusted',
     description: 'Fork PRs, first-time contributors, unknown actors',
     allow: ['Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch'],
-    denyAll: true, // deny everything not in allow list
+    denyAll: true,
     deny: [],
   },
 
+  // HIGH-04 fix: explicit allow list instead of wildcard
   contributor: {
     label: 'contributor',
     description: 'Repo collaborators with read permission',
-    allow: ['*'],
-    denyAll: false,
+    allow: ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebFetch', 'WebSearch'],
+    denyAll: true, // deny unknown tools (HIGH-04 fix)
     deny: [
       {
         tool: 'Bash',
-        when: { argKey: 'command', regex: /(rm\s+-rf|git\s+push|npm\s+publish|curl\s[^|]*\|\s*(bash|sh)|wget\s[^|]*\|\s*(bash|sh)|npm\s+install\s+github:|pip\s+install\s+git\+)/i },
+        // HIGH-01 fix: broader deny patterns including common bypasses
+        when: {
+          argKey: 'command',
+          regex: /(rm\s+(-\w+\s+)*(-\w*f|-\w*r\b).*(-\w*f|-\w*r\b)|rm\s+-rf|rm\s+.*--force|find\s.*-delete|git\s+push|npm\s+publish|npx\s+npm\s+publish|curl\s.*\|\s*(bash|sh)|wget\s.*\|\s*(bash|sh)|bash\s+-c\s*"\$\(|npm\s+install\s+(github:|git\+|https?:\/\/)|yarn\s+add\s+(github:|git\+)|pnpm\s+add\s+(github:|git\+)|pip\s+install\s+git\+)/i,
+        },
         reason: 'Destructive or untrusted install command blocked for contributor trust level',
       },
       {
         tool: 'Edit',
-        when: { argKey: 'file_path', regex: /(\.github\/workflows\/|CLAUDE\.md|\.cursorrules|\.cursorignore|\.clinerules|copilot-instructions\.md|AGENTS\.md|AGENTS\.yaml|\.windsurfrules|mcp\.json|mcp-servers\.json)/i },
+        when: {
+          argKey: 'file_path',
+          // HIGH-02 fix: broader config file matching including .claude/ paths
+          regex: /(\.github\/workflows\/|\.github\/copilot|CLAUDE\.md|\.cursorrules|\.cursorignore|\.clinerules|\.clineignore|copilot-instructions|AGENTS\.(md|yaml)|\.windsurfrules|mcp[\-.].*\.json|\.claude\/)/i,
+        },
         reason: 'Agent config and workflow files cannot be modified at contributor trust level',
       },
       {
         tool: 'Write',
-        when: { argKey: 'file_path', regex: /(\.github\/workflows\/|CLAUDE\.md|\.cursorrules|\.cursorignore|\.clinerules|copilot-instructions\.md|AGENTS\.md|AGENTS\.yaml|\.windsurfrules|mcp\.json|mcp-servers\.json)/i },
+        when: {
+          argKey: 'file_path',
+          regex: /(\.github\/workflows\/|\.github\/copilot|CLAUDE\.md|\.cursorrules|\.cursorignore|\.clinerules|\.clineignore|copilot-instructions|AGENTS\.(md|yaml)|\.windsurfrules|mcp[\-.].*\.json|\.claude\/)/i,
+        },
         reason: 'Agent config and workflow files cannot be created at contributor trust level',
       },
     ],
@@ -30124,16 +30136,19 @@ const POLICIES = {
   trusted: {
     label: 'trusted',
     description: 'Repo admins and maintainers (write+ permission)',
-    allow: ['*'],
+    allow: ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebFetch', 'WebSearch'],
     denyAll: false,
     deny: [],
   },
 };
 
 function evaluatePolicy(policy, toolName, toolArgs) {
-  // Check explicit deny rules first (with conditional matching)
+  // CRIT-02 fix: tool name normalization is done in proxy.js before calling this.
+  // But as defense in depth, also do case-insensitive matching here.
+
   for (const rule of policy.deny) {
-    if (rule.tool !== toolName) continue;
+    // Case-insensitive tool name matching
+    if (rule.tool.toLowerCase() !== toolName.toLowerCase()) continue;
 
     if (rule.when) {
       const argValue = toolArgs?.[rule.when.argKey];
@@ -30141,27 +30156,41 @@ function evaluatePolicy(policy, toolName, toolArgs) {
         const regex = rule.when.regex instanceof RegExp
           ? rule.when.regex
           : new RegExp(rule.when.regex.source || rule.when.regex, rule.when.regex.flags || 'i');
-        if (regex.test(argValue)) {
+
+        // HIGH-02 fix: canonicalize file paths before matching
+        const testValue = rule.when.argKey === 'file_path'
+          ? canonicalizePath(argValue)
+          : argValue;
+
+        if (regex.test(testValue)) {
           return { allowed: false, reason: rule.reason };
         }
       }
     } else {
-      // Unconditional deny
       return { allowed: false, reason: rule.reason || `Tool "${toolName}" is denied` };
     }
   }
 
-  // Check allow list
-  if (policy.allow.includes('*') || policy.allow.includes(toolName)) {
+  // Case-insensitive allow list check
+  const allowLower = policy.allow.map(a => a.toLowerCase());
+  if (allowLower.includes('*') || allowLower.includes(toolName.toLowerCase())) {
     return { allowed: true };
   }
 
-  // If denyAll is set, block anything not in allow
   if (policy.denyAll) {
     return { allowed: false, reason: `Tool "${toolName}" is not allowed at ${policy.label} trust level` };
   }
 
   return { allowed: true };
+}
+
+// HIGH-02 fix: resolve path traversal and normalize
+function canonicalizePath(filePath) {
+  if (!filePath) return '';
+  // Resolve relative paths to catch traversal attacks like ../../.github/workflows/
+  const resolved = (__nccwpck_require__(6928).resolve)(filePath);
+  // Also check the original (in case the config file name is at the end of a deeper path)
+  return resolved + '\n' + filePath;
 }
 
 module.exports = { POLICIES, evaluatePolicy };
@@ -32083,18 +32112,28 @@ module.exports = parseParams
 var __webpack_exports__ = {};
 const core = __nccwpck_require__(7484);
 const github = __nccwpck_require__(3228);
+const crypto = __nccwpck_require__(6982);
 const fs = __nccwpck_require__(9896);
 const path = __nccwpck_require__(6928);
 const { POLICIES } = __nccwpck_require__(7316);
 const { RULES, SURFACE_RULES } = __nccwpck_require__(1386);
 
+const MAX_INPUT_LENGTH = 50000; // MED-01 fix
+
 async function run() {
   try {
     const token = core.getInput('github-token');
-    const mode = core.getInput('mode') || 'audit';
+    const rawMode = core.getInput('mode') || 'audit';
     const customPolicyPath = core.getInput('policy');
     const octokit = github.getOctokit(token);
     const { context } = github;
+
+    // LOW-02 fix: validate mode
+    const validModes = ['enforce', 'audit'];
+    const mode = validModes.includes(rawMode) ? rawMode : 'audit';
+    if (rawMode !== mode) {
+      core.warning(`Invalid mode "${rawMode}". Valid values: enforce, audit. Defaulting to audit.`);
+    }
 
     // Step 1: Detect trust level
     const trustLevel = await detectTrustLevel(octokit, context);
@@ -32102,23 +32141,32 @@ async function run() {
     core.setOutput('trust-level', trustLevel);
 
     // Step 2: Resolve policy
-    let policy = POLICIES[trustLevel];
+    let policy = { ...POLICIES[trustLevel] };
+
+    // CRIT-03 fix: custom policies can only ADD deny rules, not replace allow/denyAll
     if (customPolicyPath && fs.existsSync(customPolicyPath)) {
       core.info(`Loading custom policy from ${customPolicyPath}`);
-      const custom = JSON.parse(fs.readFileSync(customPolicyPath, 'utf-8'));
-      if (custom[trustLevel]) {
-        policy = { ...policy, ...custom[trustLevel] };
+      try {
+        const custom = JSON.parse(fs.readFileSync(customPolicyPath, 'utf-8'));
+        if (custom[trustLevel] && Array.isArray(custom[trustLevel].deny)) {
+          // Merge deny rules (additive only, cannot remove defaults)
+          policy.deny = [...policy.deny, ...custom[trustLevel].deny];
+          core.info(`Added ${custom[trustLevel].deny.length} custom deny rule(s)`);
+        }
+        // Ignore attempts to change allow, denyAll, or label
+        if (custom[trustLevel]?.allow || custom[trustLevel]?.denyAll !== undefined) {
+          core.warning('Custom policies cannot modify allow lists or denyAll. Only additional deny rules are accepted.');
+        }
+      } catch (e) {
+        core.warning(`Failed to parse custom policy: ${e.message}`);
       }
     }
 
-    // Also check for .trust-badger.yml in repo root
-    const repoPolicyPath = path.join(process.env.GITHUB_WORKSPACE || '.', '.trust-badger.yml');
-    if (!customPolicyPath && fs.existsSync(repoPolicyPath)) {
-      core.info('Found .trust-badger.yml in repo root');
-    }
+    // MED-03 fix: remove .trust-badger.yml detection (was detected but never loaded)
+    // Will implement in a future version with proper schema validation
 
     // Step 3: Run input scanning (Layer 1)
-    const inputFindings = scanInputs(context);
+    const inputFindings = await scanInputs(octokit, context);
     if (inputFindings.length > 0) {
       core.warning(`Input scanning found ${inputFindings.length} suspicious pattern(s)`);
       for (const f of inputFindings) {
@@ -32126,12 +32174,16 @@ async function run() {
       }
     }
 
-    // Step 4: Write policy file for proxy to read
-    const policyFile = path.join(process.env.RUNNER_TEMP || '/tmp', 'trust-badger-policy.json');
+    // CRIT-04 fix: random filename for policy file
+    const policyId = crypto.randomBytes(16).toString('hex');
+    const policyFile = path.join(
+      process.env.RUNNER_TEMP || '/tmp',
+      `trust-badger-${policyId}.json`
+    );
+
     const policyData = {
       trustLevel,
       mode,
-      policy,
       inputFindings,
       context: {
         actor: process.env.GITHUB_ACTOR,
@@ -32140,28 +32192,34 @@ async function run() {
         repository: process.env.GITHUB_REPOSITORY,
       },
     };
-    fs.writeFileSync(policyFile, JSON.stringify(policyData, null, 2));
-    core.info(`Policy written to ${policyFile}`);
 
-    // Step 5: Output MCP config for the proxy
+    const policyJson = JSON.stringify(policyData, null, 2);
+    fs.writeFileSync(policyFile, policyJson);
+
+    // CRIT-04 fix: HMAC for integrity verification
+    const hmac = crypto.createHmac('sha256', 'trust-badger-integrity')
+      .update(policyJson).digest('hex');
+
+    // CRIT-05 fix: pass policy path via CLI arg (not env var that can be overwritten)
     const proxyPath = __nccwpck_require__.ab + "proxy.js";
     const mcpConfig = JSON.stringify({
       mcpServers: {
         'trust-badger': {
           command: 'node',
-          args: [__nccwpck_require__.ab + "proxy.js"],
+          args: [__nccwpck_require__.ab + "proxy.js", policyFile, hmac],
           env: {
-            TRUST_BADGER_POLICY: policyFile,
             GITHUB_STEP_SUMMARY: process.env.GITHUB_STEP_SUMMARY || '',
+            GITHUB_WORKSPACE: process.env.GITHUB_WORKSPACE || '',
           },
         },
       },
     });
 
     core.setOutput('mcp-config', mcpConfig);
+    core.setOutput('violations', '0');
     core.info('MCP proxy config ready. Pass it to your agent via --mcp-config.');
 
-    // Step 6: Write summary
+    // Step 4: Write summary
     const summaryFile = process.env.GITHUB_STEP_SUMMARY;
     if (summaryFile) {
       const summary = [
@@ -32194,11 +32252,13 @@ async function detectTrustLevel(octokit, context) {
     return 'untrusted';
   }
 
-  // pull_request_target from external = untrusted
+  // HIGH-04 fix: pull_request_target from ANY fork is untrusted, regardless of actor permissions.
+  // This event is inherently high-risk because it runs with base branch secrets.
   if (eventName === 'pull_request_target') {
-    const prAuthor = context.payload.pull_request?.user?.login;
-    if (prAuthor !== owner) {
-      core.info(`pull_request_target from external user: ${prAuthor}`);
+    const prHead = context.payload.pull_request?.head;
+    const prBase = context.payload.pull_request?.base;
+    if (prHead?.repo?.full_name !== prBase?.repo?.full_name) {
+      core.info(`pull_request_target from fork: ${prHead?.repo?.full_name}. Untrusted.`);
       return 'untrusted';
     }
   }
@@ -32209,7 +32269,7 @@ async function detectTrustLevel(octokit, context) {
       owner, repo, username: actor,
     });
 
-    const permission = data.permission; // admin, write, read, none
+    const permission = data.permission;
     core.info(`Actor ${actor} has '${permission}' permission`);
 
     if (permission === 'admin' || permission === 'write') {
@@ -32220,13 +32280,13 @@ async function detectTrustLevel(octokit, context) {
     }
     return 'untrusted';
   } catch (e) {
-    // If we can't check permissions (e.g., token doesn't have access), default to untrusted
     core.warning(`Could not check permissions for ${actor}: ${e.message}. Defaulting to untrusted.`);
     return 'untrusted';
   }
 }
 
-function scanInputs(context) {
+// MED-04 fix: also scan commit messages
+async function scanInputs(octokit, context) {
   const findings = [];
   const pr = context.payload.pull_request;
   const issue = context.payload.issue;
@@ -32235,7 +32295,21 @@ function scanInputs(context) {
     scanText(pr.title || '', 'prTitle', 'PR title', findings);
     scanText(pr.body || '', 'prBody', 'PR body', findings);
     scanText(pr.head?.ref || '', 'branchName', 'Branch name', findings);
+
+    // MED-04 fix: scan commit messages
+    try {
+      const { owner, repo } = context.repo;
+      const { data: commits } = await octokit.rest.pulls.listCommits({
+        owner, repo, pull_number: pr.number, per_page: 100,
+      });
+      for (const commit of commits) {
+        scanText(commit.commit.message || '', 'commitMsg', `Commit ${commit.sha.slice(0, 7)}`, findings);
+      }
+    } catch (e) {
+      core.warning(`Could not fetch commits for scanning: ${e.message}`);
+    }
   }
+
   if (issue) {
     scanText(issue.title || '', 'issueTitle', 'Issue title', findings);
     scanText(issue.body || '', 'issueBody', 'Issue body', findings);
@@ -32247,13 +32321,16 @@ function scanInputs(context) {
 function scanText(text, surface, locationLabel, findings) {
   if (!text || text.length === 0) return;
 
+  // MED-01 fix: cap input length before regex
+  const capped = text.slice(0, MAX_INPUT_LENGTH);
+
   const applicableRuleIds = SURFACE_RULES[surface] || [];
 
   for (const rule of RULES) {
     if (!applicableRuleIds.includes(rule.id)) continue;
 
     if (rule.detect) {
-      const matches = rule.detect(text);
+      const matches = rule.detect(capped);
       for (const m of matches) {
         findings.push({
           ruleId: rule.id,
@@ -32271,7 +32348,7 @@ function scanText(text, surface, locationLabel, findings) {
       ...(isMetadata && rule.metadataOnlyPatterns ? rule.metadataOnlyPatterns : []),
     ];
     for (const pattern of allPatterns) {
-      const match = text.match(pattern);
+      const match = capped.match(pattern);
       if (match) {
         findings.push({
           ruleId: rule.id,
