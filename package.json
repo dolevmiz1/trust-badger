@@ -1,0 +1,19 @@
+{
+  "name": "trust-badger",
+  "version": "0.1.0",
+  "description": "Scans PR inputs for prompt injection targeting AI coding agents",
+  "main": "src/index.js",
+  "scripts": {
+    "build": "ncc build src/index.js -o dist",
+    "test": "node --test tests/scan.test.js"
+  },
+  "keywords": ["github-action", "security", "prompt-injection", "ai-agent", "ci-cd"],
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@actions/core": "^1.11.1",
+    "@actions/github": "^6.0.0"
+  },
+  "devDependencies": {
+    "@vercel/ncc": "^0.38.3"
+  }
+}

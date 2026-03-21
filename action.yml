@@ -1,0 +1,21 @@
+name: 'Trust Badger'
+description: 'Scans PR inputs for prompt injection targeting AI coding agents'
+branding:
+  icon: 'shield'
+  color: 'purple'
+
+inputs:
+  fail-on-finding:
+    description: 'Fail the check if findings detected'
+    default: 'false'
+  github-token:
+    description: 'GitHub token for PR comments'
+    default: '${{ github.token }}'
+
+outputs:
+  findings-count:
+    description: 'Number of findings detected'
+
+runs:
+  using: 'node20'
+  main: 'dist/index.js'
