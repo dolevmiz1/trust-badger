@@ -32196,17 +32196,17 @@ async function run() {
     const policyJson = JSON.stringify(policyData, null, 2);
     fs.writeFileSync(policyFile, policyJson);
 
-    // CRIT-04 fix: HMAC for integrity verification
-    const hmac = crypto.createHmac('sha256', 'trust-badger-integrity')
+    // HMAC for integrity verification with runtime-generated key
+    const hmacKey = crypto.randomBytes(32).toString('hex');
+    const hmac = crypto.createHmac('sha256', hmacKey)
       .update(policyJson).digest('hex');
 
-    // CRIT-05 fix: pass policy path via CLI arg (not env var that can be overwritten)
     const proxyPath = __nccwpck_require__.ab + "proxy.js";
     const mcpConfig = JSON.stringify({
       mcpServers: {
         'trust-badger': {
           command: 'node',
-          args: [__nccwpck_require__.ab + "proxy.js", policyFile, hmac],
+          args: [__nccwpck_require__.ab + "proxy.js", policyFile, hmac, hmacKey],
           env: {
             GITHUB_STEP_SUMMARY: process.env.GITHUB_STEP_SUMMARY || '',
             GITHUB_WORKSPACE: process.env.GITHUB_WORKSPACE || '',

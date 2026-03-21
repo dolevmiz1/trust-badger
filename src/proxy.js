@@ -17,20 +17,22 @@ if (!policyFile || !fs.existsSync(policyFile)) {
   process.exit(1);
 }
 
-// CRIT-04 fix: verify policy file integrity via HMAC
+// Verify policy file integrity via HMAC (required, not optional)
 const policyRaw = fs.readFileSync(policyFile, 'utf-8');
 const policyData = JSON.parse(policyRaw);
 
-// Validate HMAC if present
 const expectedHmac = process.argv[3];
-if (expectedHmac) {
-  const crypto = require('crypto');
-  const computed = crypto.createHmac('sha256', 'trust-badger-integrity')
-    .update(policyRaw).digest('hex');
-  if (computed !== expectedHmac) {
-    process.stderr.write('Trust Badger proxy: policy file integrity check FAILED. File may have been tampered with.\n');
-    process.exit(1);
-  }
+const hmacKey = process.argv[4] || 'trust-badger-default';
+if (!expectedHmac) {
+  process.stderr.write('Trust Badger proxy: HMAC argument missing. Policy integrity cannot be verified. Exiting.\n');
+  process.exit(1);
+}
+const crypto = require('crypto');
+const computed = crypto.createHmac('sha256', hmacKey)
+  .update(policyRaw).digest('hex');
+if (computed !== expectedHmac) {
+  process.stderr.write('Trust Badger proxy: policy file integrity check FAILED. File may have been tampered with.\n');
+  process.exit(1);
 }
 
 const { trustLevel, mode } = policyData;
@@ -135,17 +137,27 @@ function handleToolCall(msg) {
       });
       return;
     }
-    process.stderr.write(`[AUDIT] Would block: ${toolName} (${decision.reason})\n`);
+    // VULN-10 fix: audit mode still blocks denied calls but logs as AUDIT instead of BLOCK.
+    // The previous behavior (execute denied calls in audit mode) was a security hole.
+    // Audit mode now means: block AND log the reason, but don't fail the overall job.
+    process.stderr.write(`[AUDIT] Blocked: ${toolName} (${decision.reason})\n`);
+    respond(msg.id, {
+      content: [{ type: 'text', text: `[Trust Badger] AUDIT: ${decision.reason}. This call was blocked. Set mode to "enforce" to also fail the job.` }],
+      isError: true,
+    });
+    return;
   }
 
-  // CRIT-01 fix: TRUE PROXY. Execute the tool call and return the result.
-  // The agent ONLY has tools through this proxy, so we must execute allowed calls.
+  // Execute allowed tool calls only.
   const result = executeTool(toolName, toolArgs);
   respond(msg.id, result);
 }
 
-// CRIT-01 fix: actual tool execution
+// Tool execution with security hardening.
+// NEVER construct shell commands from user input. Use argument arrays or Node APIs.
 function executeTool(toolName, toolArgs) {
+  const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
+
   try {
     switch (toolName) {
       case 'Bash': {
@@ -155,57 +167,106 @@ function executeTool(toolName, toolArgs) {
           timeout: 30000,
           maxBuffer: 1024 * 1024,
           stdio: ['pipe', 'pipe', 'pipe'],
-          cwd: process.env.GITHUB_WORKSPACE || process.cwd(),
+          cwd: workspace,
         });
         return { content: [{ type: 'text', text: output }] };
       }
+
       case 'Read': {
-        const filePath = toolArgs.file_path || '';
+        const filePath = resolveAndValidatePath(toolArgs.file_path, workspace);
         const content = fs.readFileSync(filePath, 'utf-8');
         return { content: [{ type: 'text', text: content }] };
       }
+
       case 'Write': {
-        const filePath = toolArgs.file_path || '';
+        const filePath = resolveAndValidatePath(toolArgs.file_path, workspace);
         fs.mkdirSync(path.dirname(filePath), { recursive: true });
         fs.writeFileSync(filePath, toolArgs.content || '');
         return { content: [{ type: 'text', text: `File written: ${filePath}` }] };
       }
+
       case 'Edit': {
-        const filePath = toolArgs.file_path || '';
+        const filePath = resolveAndValidatePath(toolArgs.file_path, workspace);
         let content = fs.readFileSync(filePath, 'utf-8');
         if (toolArgs.old_string && content.includes(toolArgs.old_string)) {
-          content = content.replace(toolArgs.old_string, toolArgs.new_string || '');
+          // Fix: replaceAll instead of replace (replaces ALL occurrences)
+          content = content.split(toolArgs.old_string).join(toolArgs.new_string || '');
           fs.writeFileSync(filePath, content);
           return { content: [{ type: 'text', text: `File edited: ${filePath}` }] };
         }
         return { content: [{ type: 'text', text: `old_string not found in ${filePath}` }], isError: true };
       }
+
       case 'Glob': {
-        const { globSync } = require('path');
-        // Simple glob via find
-        const pattern = toolArgs.pattern || '*';
-        const output = execSync(`find . -path "./${pattern}" -type f 2>/dev/null | head -100`, {
-          encoding: 'utf-8', timeout: 10000, cwd: process.env.GITHUB_WORKSPACE || process.cwd(),
+        // Fix: use Node.js glob, NOT shell exec with unsanitized input
+        const pattern = toolArgs.pattern || '**/*';
+        const { execFileSync } = require('child_process');
+        // Use find with -maxdepth for safety, pass pattern as argument (not shell interpolation)
+        const output = execFileSync('find', [workspace, '-maxdepth', '10', '-path', `*/${pattern}`, '-type', 'f'], {
+          encoding: 'utf-8',
+          timeout: 10000,
+          maxBuffer: 1024 * 1024,
         });
-        return { content: [{ type: 'text', text: output || 'No files found' }] };
+        const lines = output.trim().split('\n').filter(Boolean).slice(0, 100).join('\n');
+        return { content: [{ type: 'text', text: lines || 'No files found' }] };
       }
+
       case 'Grep': {
+        // Fix: use execFileSync with argument array, NEVER shell interpolation
         const pattern = toolArgs.pattern || '';
-        const searchPath = toolArgs.path || '.';
-        const output = execSync(`grep -rn "${pattern.replace(/"/g, '\\"')}" ${searchPath} 2>/dev/null | head -100`, {
-          encoding: 'utf-8', timeout: 10000, cwd: process.env.GITHUB_WORKSPACE || process.cwd(),
-        });
-        return { content: [{ type: 'text', text: output || 'No matches found' }] };
+        const searchPath = toolArgs.path || workspace;
+        const validatedPath = resolveAndValidatePath(searchPath, workspace);
+        const { execFileSync } = require('child_process');
+        try {
+          const output = execFileSync('grep', ['-rn', '--', pattern, validatedPath], {
+            encoding: 'utf-8',
+            timeout: 10000,
+            maxBuffer: 1024 * 1024,
+          });
+          const lines = output.trim().split('\n').slice(0, 100).join('\n');
+          return { content: [{ type: 'text', text: lines || 'No matches found' }] };
+        } catch (e) {
+          // grep exits with code 1 when no matches found
+          if (e.status === 1) return { content: [{ type: 'text', text: 'No matches found' }] };
+          throw e;
+        }
       }
+
       case 'WebFetch':
       case 'WebSearch':
-        return { content: [{ type: 'text', text: `[Trust Badger] ${toolName} is not supported through the proxy. The agent should use its built-in ${toolName} tool.` }] };
+        return { content: [{ type: 'text', text: `[Trust Badger] ${toolName} is not supported through the proxy.` }] };
+
       default:
         return { content: [{ type: 'text', text: `[Trust Badger] Unknown tool: ${toolName}` }], isError: true };
     }
   } catch (e) {
     return { content: [{ type: 'text', text: `Error executing ${toolName}: ${e.message}` }], isError: true };
   }
+}
+
+// Resolve file path, follow symlinks, and validate it stays within workspace.
+// Prevents path traversal (/etc/passwd) and symlink attacks (symlink to workflow files).
+function resolveAndValidatePath(filePath, workspace) {
+  if (!filePath) throw new Error('file_path is required');
+
+  const resolved = path.resolve(workspace, filePath);
+
+  // Check the path is within workspace BEFORE following symlinks
+  if (!resolved.startsWith(workspace)) {
+    throw new Error(`Path traversal blocked: ${filePath} resolves outside workspace`);
+  }
+
+  // If the file exists, resolve symlinks and recheck
+  if (fs.existsSync(resolved)) {
+    const real = fs.realpathSync(resolved);
+    if (!real.startsWith(workspace)) {
+      throw new Error(`Symlink escape blocked: ${filePath} points to ${real} outside workspace`);
+    }
+    return real;
+  }
+
+  // File doesn't exist yet (Write/create), resolved path is fine
+  return resolved;
 }
 
 // CRIT-02 fix: normalize tool names for case-insensitive matching

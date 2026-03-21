@@ -7,7 +7,6 @@ const path = require('path');
 const { POLICIES } = require('../src/policies');
 
 function createProxy(trustLevel, mode = 'enforce') {
-  // CRIT-04 fix test: random filename
   const policyId = crypto.randomBytes(8).toString('hex');
   const policyFile = path.join('/tmp', `trust-badger-test-${policyId}.json`);
   const policyJson = JSON.stringify({
@@ -18,13 +17,13 @@ function createProxy(trustLevel, mode = 'enforce') {
   });
   fs.writeFileSync(policyFile, policyJson);
 
-  // CRIT-04 fix test: HMAC integrity
-  const hmac = crypto.createHmac('sha256', 'trust-badger-integrity')
+  // Runtime HMAC key (not hardcoded)
+  const hmacKey = crypto.randomBytes(16).toString('hex');
+  const hmac = crypto.createHmac('sha256', hmacKey)
     .update(policyJson).digest('hex');
 
   const proxyPath = path.resolve(__dirname, '../src/proxy.js');
-  // CRIT-05 fix test: policy path via CLI arg, not env var
-  const proc = spawn('node', [proxyPath, policyFile, hmac], {
+  const proc = spawn('node', [proxyPath, policyFile, hmac, hmacKey], {
     env: { ...process.env, GITHUB_STEP_SUMMARY: '', GITHUB_WORKSPACE: process.cwd() },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
@@ -156,15 +155,15 @@ describe('Proxy: policy file integrity', () => {
     const policyJson = JSON.stringify({ trustLevel: 'trusted', mode: 'audit' });
     fs.writeFileSync(policyFile, policyJson);
 
-    // Compute HMAC for original content
-    const hmac = crypto.createHmac('sha256', 'trust-badger-integrity')
+    const hmacKey = crypto.randomBytes(16).toString('hex');
+    const hmac = crypto.createHmac('sha256', hmacKey)
       .update(policyJson).digest('hex');
 
     // Tamper the file after writing
     fs.writeFileSync(policyFile, JSON.stringify({ trustLevel: 'trusted', mode: 'audit', tampered: true }));
 
     const proxyPath = path.resolve(__dirname, '../src/proxy.js');
-    const proc = spawn('node', [proxyPath, policyFile, hmac], {
+    const proc = spawn('node', [proxyPath, policyFile, hmac, hmacKey], {
       env: { ...process.env, GITHUB_STEP_SUMMARY: '' },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -199,7 +198,7 @@ describe('Proxy: input validation', () => {
 
 // LOW-02 fix test: invalid mode defaults to audit
 describe('Proxy: mode validation', () => {
-  it('invalid mode defaults to audit (allows blocked calls)', async () => {
+  it('invalid mode defaults to audit (blocks but does not fail job)', async () => {
     const proxy = createProxy('untrusted', 'enforc'); // typo
     proxy.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
     await new Promise(r => setTimeout(r, 200));
@@ -208,10 +207,81 @@ describe('Proxy: mode validation', () => {
     const stderr = proxy.getStderr();
     proxy.cleanup();
 
-    // In audit mode, the call is allowed (not blocked)
+    // Audit mode now blocks too (VULN-10 fix), but logs as AUDIT
     const callResponse = responses.find(r => r.id === 2);
-    assert.ok(!callResponse.result.isError, 'Typo mode should default to audit (not block)');
+    assert.ok(callResponse.result.isError, 'Audit mode should still block denied calls');
+    assert.ok(callResponse.result.content[0].text.includes('AUDIT'), 'Should say AUDIT not BLOCKED');
     assert.ok(stderr.includes('invalid mode'), 'Should warn about invalid mode');
+  });
+});
+
+// VULN-01/02/03 fix test: Grep and Glob shell injection prevented
+describe('Proxy: shell injection in Grep/Glob prevented', () => {
+  it('Grep searchPath injection does not execute shell commands', async () => {
+    const proxy = createProxy('trusted', 'enforce');
+    proxy.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+    await new Promise(r => setTimeout(r, 200));
+    proxy.send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: {
+      name: 'Grep',
+      arguments: { pattern: 'x', path: '; echo PWNED > /tmp/pwned #' }
+    }});
+    const responses = await proxy.getResponses(2);
+    proxy.cleanup();
+
+    const callResponse = responses.find(r => r.id === 2);
+    // Should error (path doesn't exist or is outside workspace) but NOT execute the injected command
+    const fs = require('fs');
+    assert.ok(!fs.existsSync('/tmp/pwned'), 'Shell injection in Grep path must NOT execute');
+  });
+
+  it('Grep pattern injection does not execute shell commands', async () => {
+    const proxy = createProxy('trusted', 'enforce');
+    proxy.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+    await new Promise(r => setTimeout(r, 200));
+    proxy.send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: {
+      name: 'Grep',
+      arguments: { pattern: '$(echo PWNED > /tmp/pwned2)', path: '.' }
+    }});
+    const responses = await proxy.getResponses(2);
+    proxy.cleanup();
+
+    const fs = require('fs');
+    assert.ok(!fs.existsSync('/tmp/pwned2'), 'Shell injection in Grep pattern must NOT execute');
+  });
+});
+
+// VULN-07 fix test: path traversal blocked
+describe('Proxy: path traversal protection', () => {
+  it('Read blocks /etc/passwd', async () => {
+    const proxy = createProxy('untrusted', 'enforce');
+    proxy.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+    await new Promise(r => setTimeout(r, 200));
+    proxy.send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: {
+      name: 'Read',
+      arguments: { file_path: '/etc/passwd' }
+    }});
+    const responses = await proxy.getResponses(2);
+    proxy.cleanup();
+
+    const callResponse = responses.find(r => r.id === 2);
+    assert.ok(callResponse.result.isError, 'Should block reading /etc/passwd');
+    assert.ok(callResponse.result.content[0].text.includes('traversal') || callResponse.result.content[0].text.includes('outside workspace'),
+      'Should mention path traversal');
+  });
+
+  it('Read blocks /proc/self/environ', async () => {
+    const proxy = createProxy('untrusted', 'enforce');
+    proxy.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+    await new Promise(r => setTimeout(r, 200));
+    proxy.send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: {
+      name: 'Read',
+      arguments: { file_path: '/proc/self/environ' }
+    }});
+    const responses = await proxy.getResponses(2);
+    proxy.cleanup();
+
+    const callResponse = responses.find(r => r.id === 2);
+    assert.ok(callResponse.result.isError, 'Should block reading /proc/self/environ');
   });
 });
 
