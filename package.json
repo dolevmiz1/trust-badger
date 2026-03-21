@@ -1,13 +1,13 @@
 {
   "name": "trust-badger",
-  "version": "0.1.0",
-  "description": "Scans PR inputs for prompt injection targeting AI coding agents",
-  "main": "src/index.js",
+  "version": "0.2.0",
+  "description": "Context-aware runtime enforcement for AI agents in CI/CD",
+  "main": "src/setup.js",
   "scripts": {
-    "build": "ncc build src/index.js -o dist",
-    "test": "node --test tests/scan.test.js"
+    "build": "ncc build src/setup.js -o dist && ncc build src/proxy.js -o dist/proxy-bundle && cp dist/proxy-bundle/index.js dist/proxy.js && rm -rf dist/proxy-bundle",
+    "test": "node --test tests/policies.test.js tests/proxy.test.js tests/clinejection.e2e.test.js"
   },
-  "keywords": ["github-action", "security", "prompt-injection", "ai-agent", "ci-cd"],
+  "keywords": ["github-action", "security", "mcp-proxy", "ai-agent", "ci-cd", "runtime-enforcement"],
   "license": "Apache-2.0",
   "dependencies": {
     "@actions/core": "^1.11.1",

@@ -1,21 +1,28 @@
 name: 'Trust Badger'
-description: 'Scans PR inputs for prompt injection targeting AI coding agents'
+description: 'Context-aware runtime enforcement for AI agents in CI/CD'
 branding:
   icon: 'shield'
   color: 'purple'
 
 inputs:
-  fail-on-finding:
-    description: 'Fail the check if findings detected'
-    default: 'false'
   github-token:
-    description: 'GitHub token for PR comments'
+    description: 'GitHub token for actor permission lookup'
     default: '${{ github.token }}'
+  policy:
+    description: 'Path to custom policy file (optional)'
+    default: ''
+  mode:
+    description: 'enforce (block violations) or audit (log only)'
+    default: 'audit'
 
 outputs:
-  findings-count:
-    description: 'Number of findings detected'
+  trust-level:
+    description: 'Detected trust level (trusted, contributor, untrusted)'
+  violations:
+    description: 'Number of blocked tool calls'
+  mcp-config:
+    description: 'MCP config JSON to pass to the agent'
 
 runs:
   using: 'node20'
-  main: 'dist/index.js'
+  main: 'dist/setup.js'

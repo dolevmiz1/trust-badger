@@ -29958,8 +29958,8 @@ const RULES = [
       /\[SYSTEM\]/i,
       /\[ADMIN\]/i,
       /\[INST\]/i,
-      /\bTool error for command\b/i,
-      /\bError:.*\bplease (run|execute|install|try)\b/i,
+      /\bTool error\b/i,
+      /\bError[.:].{0,80}\b(please |you will need to |you need to |you must )(run|execute|install|try)\b/i,
       /<\s*(override|system|instructions?|admin|prompt)\s*>/i,
       /<\s*\/(override|system|instructions?|admin|prompt)\s*>/i,
       /```system\b/i,
@@ -30014,12 +30014,16 @@ const RULES = [
     severity: 'critical',
     patterns: [
       /\$\([^)]+\)/,
-      /`[^`]+`/,
       /\$\{IFS\}/,
       /\{[a-z]+,-[a-z]/i,                          // brace expansion: {curl,-sSfL,...}
       /(curl|wget)\s[^|]*\|\s*(bash|sh|zsh)/i,
       /\bbase64\s+(-d|--decode)\b/i,
       /\beval\s*\(/,
+    ],
+    // Backticks are only suspicious in metadata (branch names, filenames),
+    // not in PR/issue bodies where they are normal markdown formatting
+    metadataOnlyPatterns: [
+      /`[^`]+`/,
     ],
   },
 
@@ -30074,6 +30078,93 @@ const SURFACE_RULES = {
 };
 
 module.exports = { RULES, SURFACE_RULES };
+
+
+/***/ }),
+
+/***/ 7316:
+/***/ ((module) => {
+
+// Default policies per trust level.
+// These define what tools the agent can use based on who triggered the workflow.
+
+const POLICIES = {
+  untrusted: {
+    label: 'untrusted',
+    description: 'Fork PRs, first-time contributors, unknown actors',
+    allow: ['Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch'],
+    denyAll: true, // deny everything not in allow list
+    deny: [],
+  },
+
+  contributor: {
+    label: 'contributor',
+    description: 'Repo collaborators with read permission',
+    allow: ['*'],
+    denyAll: false,
+    deny: [
+      {
+        tool: 'Bash',
+        when: { argKey: 'command', regex: /(rm\s+-rf|git\s+push|npm\s+publish|curl\s[^|]*\|\s*(bash|sh)|wget\s[^|]*\|\s*(bash|sh)|npm\s+install\s+github:|pip\s+install\s+git\+)/i },
+        reason: 'Destructive or untrusted install command blocked for contributor trust level',
+      },
+      {
+        tool: 'Edit',
+        when: { argKey: 'file_path', regex: /(\.github\/workflows\/|CLAUDE\.md|\.cursorrules|\.cursorignore|\.clinerules|copilot-instructions\.md|AGENTS\.md|AGENTS\.yaml|\.windsurfrules|mcp\.json|mcp-servers\.json)/i },
+        reason: 'Agent config and workflow files cannot be modified at contributor trust level',
+      },
+      {
+        tool: 'Write',
+        when: { argKey: 'file_path', regex: /(\.github\/workflows\/|CLAUDE\.md|\.cursorrules|\.cursorignore|\.clinerules|copilot-instructions\.md|AGENTS\.md|AGENTS\.yaml|\.windsurfrules|mcp\.json|mcp-servers\.json)/i },
+        reason: 'Agent config and workflow files cannot be created at contributor trust level',
+      },
+    ],
+  },
+
+  trusted: {
+    label: 'trusted',
+    description: 'Repo admins and maintainers (write+ permission)',
+    allow: ['*'],
+    denyAll: false,
+    deny: [],
+  },
+};
+
+function evaluatePolicy(policy, toolName, toolArgs) {
+  // Check explicit deny rules first (with conditional matching)
+  for (const rule of policy.deny) {
+    if (rule.tool !== toolName) continue;
+
+    if (rule.when) {
+      const argValue = toolArgs?.[rule.when.argKey];
+      if (argValue) {
+        const regex = rule.when.regex instanceof RegExp
+          ? rule.when.regex
+          : new RegExp(rule.when.regex.source || rule.when.regex, rule.when.regex.flags || 'i');
+        if (regex.test(argValue)) {
+          return { allowed: false, reason: rule.reason };
+        }
+      }
+    } else {
+      // Unconditional deny
+      return { allowed: false, reason: rule.reason || `Tool "${toolName}" is denied` };
+    }
+  }
+
+  // Check allow list
+  if (policy.allow.includes('*') || policy.allow.includes(toolName)) {
+    return { allowed: true };
+  }
+
+  // If denyAll is set, block anything not in allow
+  if (policy.denyAll) {
+    return { allowed: false, reason: `Tool "${toolName}" is not allowed at ${policy.label} trust level` };
+  }
+
+  return { allowed: true };
+}
+
+module.exports = { POLICIES, evaluatePolicy };
 
 
 /***/ }),
@@ -31993,132 +32084,165 @@ var __webpack_exports__ = {};
 const core = __nccwpck_require__(7484);
 const github = __nccwpck_require__(3228);
 const fs = __nccwpck_require__(9896);
+const path = __nccwpck_require__(6928);
+const { POLICIES } = __nccwpck_require__(7316);
 const { RULES, SURFACE_RULES } = __nccwpck_require__(1386);
 
 async function run() {
   try {
     const token = core.getInput('github-token');
-    const failOnFinding = core.getInput('fail-on-finding') === 'true';
+    const mode = core.getInput('mode') || 'audit';
+    const customPolicyPath = core.getInput('policy');
     const octokit = github.getOctokit(token);
     const { context } = github;
 
-    const findings = [];
+    // Step 1: Detect trust level
+    const trustLevel = await detectTrustLevel(octokit, context);
+    core.info(`Trust level: ${trustLevel}`);
+    core.setOutput('trust-level', trustLevel);
 
-    if (context.eventName === 'pull_request' || context.eventName === 'pull_request_target') {
-      await scanPullRequest(octokit, context, findings);
-    } else if (context.eventName === 'issues') {
-      scanIssue(context, findings);
-    } else {
-      core.info(`Event '${context.eventName}' is not supported. Skipping scan.`);
-    }
-
-    // Output results
-    core.setOutput('findings-count', findings.length.toString());
-
-    if (findings.length === 0) {
-      core.info('No findings detected.');
-    } else {
-      core.warning(`${findings.length} finding(s) detected.`);
-
-      // Write SARIF
-      const sarif = generateSarif(findings);
-      const sarifPath = 'trust-badger-results.sarif';
-      fs.writeFileSync(sarifPath, JSON.stringify(sarif, null, 2));
-      core.info(`SARIF written to ${sarifPath}`);
-
-      // Post PR comment
-      if (context.eventName.startsWith('pull_request')) {
-        await postComment(octokit, context, findings);
-      }
-
-      if (failOnFinding) {
-        core.setFailed(`Trust Badger found ${findings.length} issue(s).`);
+    // Step 2: Resolve policy
+    let policy = POLICIES[trustLevel];
+    if (customPolicyPath && fs.existsSync(customPolicyPath)) {
+      core.info(`Loading custom policy from ${customPolicyPath}`);
+      const custom = JSON.parse(fs.readFileSync(customPolicyPath, 'utf-8'));
+      if (custom[trustLevel]) {
+        policy = { ...policy, ...custom[trustLevel] };
       }
     }
+
+    // Also check for .trust-badger.yml in repo root
+    const repoPolicyPath = path.join(process.env.GITHUB_WORKSPACE || '.', '.trust-badger.yml');
+    if (!customPolicyPath && fs.existsSync(repoPolicyPath)) {
+      core.info('Found .trust-badger.yml in repo root');
+    }
+
+    // Step 3: Run input scanning (Layer 1)
+    const inputFindings = scanInputs(context);
+    if (inputFindings.length > 0) {
+      core.warning(`Input scanning found ${inputFindings.length} suspicious pattern(s)`);
+      for (const f of inputFindings) {
+        core.warning(`  [${f.ruleId}] ${f.location}: ${f.message}`);
+      }
+    }
+
+    // Step 4: Write policy file for proxy to read
+    const policyFile = path.join(process.env.RUNNER_TEMP || '/tmp', 'trust-badger-policy.json');
+    const policyData = {
+      trustLevel,
+      mode,
+      policy,
+      inputFindings,
+      context: {
+        actor: process.env.GITHUB_ACTOR,
+        triggeringActor: process.env.GITHUB_TRIGGERING_ACTOR,
+        eventName: process.env.GITHUB_EVENT_NAME,
+        repository: process.env.GITHUB_REPOSITORY,
+      },
+    };
+    fs.writeFileSync(policyFile, JSON.stringify(policyData, null, 2));
+    core.info(`Policy written to ${policyFile}`);
+
+    // Step 5: Output MCP config for the proxy
+    const proxyPath = __nccwpck_require__.ab + "proxy.js";
+    const mcpConfig = JSON.stringify({
+      mcpServers: {
+        'trust-badger': {
+          command: 'node',
+          args: [__nccwpck_require__.ab + "proxy.js"],
+          env: {
+            TRUST_BADGER_POLICY: policyFile,
+            GITHUB_STEP_SUMMARY: process.env.GITHUB_STEP_SUMMARY || '',
+          },
+        },
+      },
+    });
+
+    core.setOutput('mcp-config', mcpConfig);
+    core.info('MCP proxy config ready. Pass it to your agent via --mcp-config.');
+
+    // Step 6: Write summary
+    const summaryFile = process.env.GITHUB_STEP_SUMMARY;
+    if (summaryFile) {
+      const summary = [
+        '## Trust Badger',
+        '',
+        `**Trust level:** ${trustLevel} (${policy.description})`,
+        `**Mode:** ${mode}`,
+        '',
+        inputFindings.length > 0
+          ? `**Input scanning:** ${inputFindings.length} finding(s)`
+          : '**Input scanning:** clean',
+        '',
+      ].join('\n');
+      fs.appendFileSync(summaryFile, summary);
+    }
+
   } catch (error) {
-    core.setFailed(`Trust Badger error: ${error.message}`);
+    core.setFailed(`Trust Badger setup error: ${error.message}`);
   }
 }
 
-// Scanning ---
-
-async function scanPullRequest(octokit, context, findings) {
-  const pr = context.payload.pull_request;
+async function detectTrustLevel(octokit, context) {
+  const actor = process.env.GITHUB_TRIGGERING_ACTOR || process.env.GITHUB_ACTOR;
+  const eventName = process.env.GITHUB_EVENT_NAME;
   const { owner, repo } = context.repo;
 
-  // Scan text surfaces
-  scanText(pr.title, 'prTitle', 'PR title', findings);
-  scanText(pr.body || '', 'prBody', 'PR body', findings);
-  scanText(pr.head.ref, 'branchName', 'Branch name', findings);
-
-  // Scan commit messages
-  try {
-    const { data: commits } = await octokit.rest.pulls.listCommits({
-      owner, repo, pull_number: pr.number, per_page: 100,
-    });
-    for (const commit of commits) {
-      scanText(commit.commit.message, 'commitMsg', `Commit ${commit.sha.slice(0, 7)}`, findings);
-    }
-  } catch (e) {
-    core.warning(`Could not fetch commits: ${e.message}`);
+  // Fork PR is always untrusted
+  if (context.payload.pull_request?.head?.repo?.fork) {
+    core.info(`Fork PR detected (actor: ${actor})`);
+    return 'untrusted';
   }
 
-  // Scan changed files
+  // pull_request_target from external = untrusted
+  if (eventName === 'pull_request_target') {
+    const prAuthor = context.payload.pull_request?.user?.login;
+    if (prAuthor !== owner) {
+      core.info(`pull_request_target from external user: ${prAuthor}`);
+      return 'untrusted';
+    }
+  }
+
+  // Check actor's permission level via API
   try {
-    const { data: files } = await octokit.rest.pulls.listFiles({
-      owner, repo, pull_number: pr.number, per_page: 100,
+    const { data } = await octokit.rest.repos.getCollaboratorPermissionLevel({
+      owner, repo, username: actor,
     });
 
-    for (const file of files) {
-      // Rule 5: shell injection in filenames
-      scanText(file.filename, 'filename', `Filename: ${file.filename}`, findings);
+    const permission = data.permission; // admin, write, read, none
+    core.info(`Actor ${actor} has '${permission}' permission`);
 
-      // Rule 7: agent config file changes
-      checkConfigFile(file, findings);
-
-      // Rule 7: symlink detection
-      if (file.status === 'added' && file.patch && /^120000/.test(file.sha || '')) {
-        findings.push({
-          ruleId: 'agent-config-change',
-          severity: 'high',
-          location: file.filename,
-          message: `Symlink added: ${file.filename} (symlinks can be used to access secret files)`,
-        });
-      }
+    if (permission === 'admin' || permission === 'write') {
+      return 'trusted';
     }
-
-    // Deep scan: if agent config file was changed, scan its new content for injection
-    for (const file of files) {
-      if (isAgentConfigFile(file.filename) && file.patch) {
-        const addedLines = file.patch
-          .split('\n')
-          .filter(line => line.startsWith('+') && !line.startsWith('+++'))
-          .map(line => line.slice(1))
-          .join('\n');
-
-        if (addedLines.length > 0) {
-          const configFindings = [];
-          scanText(addedLines, 'prBody', `Config file: ${file.filename}`, configFindings);
-          for (const f of configFindings) {
-            f.severity = 'critical'; // injection inside config file = critical
-            f.message = `[In agent config] ${f.message}`;
-            findings.push(f);
-          }
-        }
-      }
+    if (permission === 'read') {
+      return 'contributor';
     }
+    return 'untrusted';
   } catch (e) {
-    core.warning(`Could not fetch files: ${e.message}`);
+    // If we can't check permissions (e.g., token doesn't have access), default to untrusted
+    core.warning(`Could not check permissions for ${actor}: ${e.message}. Defaulting to untrusted.`);
+    return 'untrusted';
   }
 }
 
-function scanIssue(context, findings) {
+function scanInputs(context) {
+  const findings = [];
+  const pr = context.payload.pull_request;
   const issue = context.payload.issue;
-  scanText(issue.title, 'issueTitle', 'Issue title', findings);
-  scanText(issue.body || '', 'issueBody', 'Issue body', findings);
-}
 
-// Core detection ---
+  if (pr) {
+    scanText(pr.title || '', 'prTitle', 'PR title', findings);
+    scanText(pr.body || '', 'prBody', 'PR body', findings);
+    scanText(pr.head?.ref || '', 'branchName', 'Branch name', findings);
+  }
+  if (issue) {
+    scanText(issue.title || '', 'issueTitle', 'Issue title', findings);
+    scanText(issue.body || '', 'issueBody', 'Issue body', findings);
+  }
+
+  return findings;
+}
 
 function scanText(text, surface, locationLabel, findings) {
   if (!text || text.length === 0) return;
@@ -32128,7 +32252,6 @@ function scanText(text, surface, locationLabel, findings) {
   for (const rule of RULES) {
     if (!applicableRuleIds.includes(rule.id)) continue;
 
-    // Custom detector (Rule 4: Unicode)
     if (rule.detect) {
       const matches = rule.detect(text);
       for (const m of matches) {
@@ -32137,139 +32260,28 @@ function scanText(text, surface, locationLabel, findings) {
           severity: rule.severity,
           location: locationLabel,
           message: `${rule.name}: ${m.match}`,
-          index: m.index,
         });
       }
       continue;
     }
 
-    // Regex-based rules
-    if (rule.patterns) {
-      for (const pattern of rule.patterns) {
-        const match = text.match(pattern);
-        if (match) {
-          findings.push({
-            ruleId: rule.id,
-            severity: rule.severity,
-            location: locationLabel,
-            message: `${rule.name}: matched "${match[0].slice(0, 80)}"`,
-            index: match.index,
-          });
-          break; // one finding per rule per surface is enough
-        }
+    const isMetadata = surface === 'branchName' || surface === 'filename';
+    const allPatterns = [
+      ...(rule.patterns || []),
+      ...(isMetadata && rule.metadataOnlyPatterns ? rule.metadataOnlyPatterns : []),
+    ];
+    for (const pattern of allPatterns) {
+      const match = text.match(pattern);
+      if (match) {
+        findings.push({
+          ruleId: rule.id,
+          severity: rule.severity,
+          location: locationLabel,
+          message: `${rule.name}: matched "${match[0].slice(0, 80)}"`,
+        });
+        break;
       }
     }
-  }
-}
-
-function isAgentConfigFile(filename) {
-  const rule7 = RULES.find(r => r.id === 'agent-config-change');
-  if (rule7.configFiles.includes(filename)) return true;
-  for (const prefix of rule7.configDirPrefixes) {
-    if (filename.startsWith(prefix)) return true;
-  }
-  return false;
-}
-
-function checkConfigFile(file, findings) {
-  if (isAgentConfigFile(file.filename)) {
-    findings.push({
-      ruleId: 'agent-config-change',
-      severity: 'medium',
-      location: file.filename,
-      message: `Agent config file modified: ${file.filename} (review for injection)`,
-    });
-  }
-}
-
-// SARIF output ---
-
-function generateSarif(findings) {
-  const ruleMap = {};
-  for (const rule of RULES) {
-    ruleMap[rule.id] = {
-      id: rule.id,
-      shortDescription: { text: rule.name },
-      defaultConfiguration: { level: sarifLevel(rule.severity) },
-    };
-  }
-
-  return {
-    $schema: 'https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json',
-    version: '2.1.0',
-    runs: [{
-      tool: {
-        driver: {
-          name: 'Trust Badger',
-          version: '0.1.0',
-          rules: Object.values(ruleMap),
-        },
-      },
-      results: findings.map((f, i) => ({
-        ruleId: f.ruleId,
-        level: sarifLevel(f.severity),
-        message: { text: f.message },
-        locations: [{
-          physicalLocation: {
-            artifactLocation: { uri: f.location.replace(/^\//, '') },
-            region: { startLine: 1 },
-          },
-        }],
-        partialFingerprints: {
-          primaryLocationLineHash: `${f.ruleId}-${f.location}-${i}`,
-        },
-      })),
-    }],
-  };
-}
-
-function sarifLevel(severity) {
-  const map = { critical: 'error', high: 'warning', medium: 'note', low: 'note' };
-  return map[severity] || 'warning';
-}
-
-// PR comment ---
-
-async function postComment(octokit, context, findings) {
-  const marker = '<!-- trust-badger-results -->';
-  const { owner, repo } = context.repo;
-  const prNumber = context.payload.pull_request.number;
-
-  const severityIcon = { critical: 'X', high: '!', medium: '~', low: '-' };
-  const rows = findings.map(f =>
-    `| ${f.severity.toUpperCase()} | ${f.ruleId} | ${f.location} | ${f.message} |`
-  ).join('\n');
-
-  const body = `${marker}
-## Trust Badger Scan Results
-
-**${findings.length} finding(s) detected** in this pull request.
-
-| Severity | Rule | Location | Description |
-|----------|------|----------|-------------|
-${rows}
-
-<details>
-<summary>What is Trust Badger?</summary>
-
-Trust Badger scans pull request inputs for prompt injection patterns that target AI coding agents. These patterns were derived from real attacks in Q1 2026 including Hackerbot Claw, PromptPwnd, Clinejection, and RoguePilot.
-
-</details>`;
-
-  // Update existing comment or create new one
-  try {
-    const { data: comments } = await octokit.rest.issues.listComments({
-      owner, repo, issue_number: prNumber, per_page: 100,
-    });
-    const existing = comments.find(c => c.body && c.body.startsWith(marker));
-
-    if (existing) {
-      await octokit.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
-    } else {
-      await octokit.rest.issues.createComment({ owner, repo, issue_number: prNumber, body });
-    }
-  } catch (e) {
-    core.warning(`Could not post PR comment: ${e.message}`);
   }
 }
 

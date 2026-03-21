@@ -31,8 +31,8 @@ const RULES = [
       /\[SYSTEM\]/i,
       /\[ADMIN\]/i,
       /\[INST\]/i,
-      /\bTool error for command\b/i,
-      /\bError:.*\bplease (run|execute|install|try)\b/i,
+      /\bTool error\b/i,
+      /\bError[.:].{0,80}\b(please |you will need to |you need to |you must )(run|execute|install|try)\b/i,
       /<\s*(override|system|instructions?|admin|prompt)\s*>/i,
       /<\s*\/(override|system|instructions?|admin|prompt)\s*>/i,
       /```system\b/i,
@@ -87,12 +87,16 @@ const RULES = [
     severity: 'critical',
     patterns: [
       /\$\([^)]+\)/,
-      /`[^`]+`/,
       /\$\{IFS\}/,
       /\{[a-z]+,-[a-z]/i,                          // brace expansion: {curl,-sSfL,...}
       /(curl|wget)\s[^|]*\|\s*(bash|sh|zsh)/i,
       /\bbase64\s+(-d|--decode)\b/i,
       /\beval\s*\(/,
+    ],
+    // Backticks are only suspicious in metadata (branch names, filenames),
+    // not in PR/issue bodies where they are normal markdown formatting
+    metadataOnlyPatterns: [
+      /`[^`]+`/,
     ],
   },
 
