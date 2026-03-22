@@ -55,9 +55,13 @@ steps:
 
 ## Proven in Real GitHub Actions
 
-All 3 CI jobs pass, including a live Claude Code integration:
+All CI jobs pass, including a live Claude Code integration and real fork PR enforcement:
 
 ![CI Results](docs/diagrams/claude-integration-success.png)
+
+**Real fork PR enforcement proven:** A fork PR from a different account was correctly assigned `untrusted` trust level with all write tools blocked.
+
+![Fork PR Untrusted](docs/diagrams/fork-pr-untrusted.png)
 
 <details>
 <summary>Proxy integration test logs</summary>
