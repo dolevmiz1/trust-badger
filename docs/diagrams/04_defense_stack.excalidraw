@@ -1,0 +1,186 @@
+{
+  "type": "excalidraw",
+  "version": 2,
+  "source": "trust-badger",
+  "elements": [
+    {
+      "type": "text",
+      "version": 1,
+      "id": "title",
+      "x": 150,
+      "y": 20,
+      "width": 600,
+      "height": 50,
+      "text": "5-Layer Defense Stack",
+      "fontSize": 40,
+      "fontFamily": 3,
+      "textAlign": "center",
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "transparent"
+    },
+    {
+      "type": "text",
+      "version": 1,
+      "id": "subtitle",
+      "x": 150,
+      "y": 70,
+      "width": 600,
+      "height": 25,
+      "text": "Each layer is independent. Any single layer can stop an attack.",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "strokeColor": "#868e96"
+    },
+
+    {
+      "type": "rectangle",
+      "version": 1,
+      "id": "layer1",
+      "x": 100,
+      "y": 120,
+      "width": 700,
+      "height": 70,
+      "strokeColor": "#1971c2",
+      "backgroundColor": "#d0ebff",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "roundness": { "type": 3 }
+    },
+    {
+      "type": "text",
+      "version": 1,
+      "id": "layer1-text",
+      "x": 120,
+      "y": 135,
+      "width": 660,
+      "height": 40,
+      "text": "Layer 1: Input Scanning\nPrompt injection detection in PR/issue/dispatch/comment text",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "strokeColor": "#1971c2"
+    },
+
+    {
+      "type": "rectangle",
+      "version": 1,
+      "id": "layer2",
+      "x": 100,
+      "y": 210,
+      "width": 700,
+      "height": 70,
+      "strokeColor": "#862e9c",
+      "backgroundColor": "#f3d9fa",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "roundness": { "type": 3 }
+    },
+    {
+      "type": "text",
+      "version": 1,
+      "id": "layer2-text",
+      "x": 120,
+      "y": 225,
+      "width": 660,
+      "height": 40,
+      "text": "Layer 2: Trust Detection\nGitHub API role check + fork/bot/event detection -> trust level",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "strokeColor": "#862e9c"
+    },
+
+    {
+      "type": "rectangle",
+      "version": 1,
+      "id": "layer3",
+      "x": 100,
+      "y": 300,
+      "width": 700,
+      "height": 70,
+      "strokeColor": "#e8590c",
+      "backgroundColor": "#fff4e6",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "roundness": { "type": 3 }
+    },
+    {
+      "type": "text",
+      "version": 1,
+      "id": "layer3-text",
+      "x": 120,
+      "y": 315,
+      "width": 660,
+      "height": 40,
+      "text": "Layer 3: Policy Engine\nBash allow list + tool restrictions per trust level",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "strokeColor": "#e8590c"
+    },
+
+    {
+      "type": "rectangle",
+      "version": 1,
+      "id": "layer4",
+      "x": 100,
+      "y": 390,
+      "width": 700,
+      "height": 70,
+      "strokeColor": "#c92a2a",
+      "backgroundColor": "#ffe3e3",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "roundness": { "type": 3 }
+    },
+    {
+      "type": "text",
+      "version": 1,
+      "id": "layer4-text",
+      "x": 120,
+      "y": 405,
+      "width": 660,
+      "height": 40,
+      "text": "Layer 4: Network Isolation (Linux)\nunshare --net: no internet, loopback only",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "strokeColor": "#c92a2a"
+    },
+
+    {
+      "type": "rectangle",
+      "version": 1,
+      "id": "layer5",
+      "x": 100,
+      "y": 480,
+      "width": 700,
+      "height": 70,
+      "strokeColor": "#2b8a3e",
+      "backgroundColor": "#d3f9d8",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "roundness": { "type": 3 }
+    },
+    {
+      "type": "text",
+      "version": 1,
+      "id": "layer5-text",
+      "x": 120,
+      "y": 495,
+      "width": 660,
+      "height": 40,
+      "text": "Layer 5: Filesystem Sandbox (Linux)\nbubblewrap: protected paths mounted read-only",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "strokeColor": "#2b8a3e"
+    }
+  ],
+  "appState": {
+    "viewBackgroundColor": "#ffffff",
+    "gridSize": null
+  },
+  "files": {}
+}
