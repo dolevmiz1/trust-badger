@@ -30,4 +30,4 @@ outputs:
 
 runs:
   using: 'node20'
-  main: 'dist/setup.js'
+  main: 'dist/index.js'
