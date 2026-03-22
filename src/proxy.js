@@ -162,6 +162,41 @@ function executeTool(toolName, toolArgs) {
     switch (toolName) {
       case 'Bash': {
         const cmd = toolArgs.command || '';
+
+        // Reject null bytes (could cause truncation at C level)
+        if (cmd.includes('\0')) {
+          return { content: [{ type: 'text', text: 'Command rejected: contains null bytes' }], isError: true };
+        }
+
+        // Network-isolated execution for contributor on Linux.
+        // Writes command to a temp file (no shell escaping needed),
+        // runs it inside a network namespace with no internet access.
+        // Loopback stays up so localhost-based test servers work.
+        if (process.platform === 'linux' && policy.bashMode === 'allowlist') {
+          const tmpScript = path.join(workspace, `.trust-badger-cmd-${process.pid}-${Date.now()}.sh`);
+          try {
+            fs.writeFileSync(tmpScript, cmd, { mode: 0o700 });
+            const { execFileSync } = require('child_process');
+            const envVars = 'PATH,HOME,NODE_PATH,PYTHONPATH,GOPATH,CARGO_HOME,npm_config_cache,LANG,TERM';
+            const user = process.env.USER || 'runner';
+            const innerCmd = `ip link set lo up && sudo --preserve-env=${envVars} -u ${user} bash ${tmpScript}`;
+            const output = execFileSync('sudo', ['unshare', '--net', 'sh', '-c', innerCmd], {
+              encoding: 'utf-8',
+              timeout: 120000,
+              maxBuffer: 4 * 1024 * 1024,
+              cwd: workspace,
+              env: process.env,
+            });
+            return { content: [{ type: 'text', text: output }] };
+          } catch (e) {
+            const combined = (e.stdout || '') + (e.stderr ? '\nSTDERR:\n' + e.stderr : '');
+            return { content: [{ type: 'text', text: combined || e.message }], isError: true };
+          } finally {
+            try { fs.unlinkSync(tmpScript); } catch (e) { /* cleanup */ }
+          }
+        }
+
+        // Non-Linux or trusted: direct execution (no network isolation)
         try {
           const output = execSync(cmd, {
             encoding: 'utf-8',
@@ -171,7 +206,6 @@ function executeTool(toolName, toolArgs) {
           });
           return { content: [{ type: 'text', text: output }] };
         } catch (e) {
-          // execSync throws on non-zero exit. Return combined stdout+stderr.
           const combined = (e.stdout || '') + (e.stderr ? '\nSTDERR:\n' + e.stderr : '');
           return { content: [{ type: 'text', text: combined || e.message }], isError: true };
         }

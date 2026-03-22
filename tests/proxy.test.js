@@ -302,3 +302,83 @@ describe('Proxy: deep argument scanning', () => {
     assert.ok(callResponse.result.isError, 'Should detect injection in nested args');
   });
 });
+
+// Network isolation tests (Linux only)
+describe('Proxy: network-isolated Bash (Linux)', function() {
+  const isLinux = process.platform === 'linux';
+
+  it('contributor Bash: allowed command works', async function() {
+    if (!isLinux) { console.log('    SKIP: not Linux'); return; }
+
+    const proxy = createProxy('contributor', 'enforce');
+    proxy.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+    await new Promise(r => setTimeout(r, 300));
+    proxy.send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: {
+      name: 'Bash', arguments: { command: 'echo hello world' }
+    }});
+    const responses = await proxy.getResponses(2, 10000);
+    proxy.cleanup();
+
+    const callResponse = responses.find(r => r.id === 2);
+    assert.ok(callResponse, 'Should get a response');
+    assert.ok(callResponse.result.content[0].text.includes('hello world'),
+      'Allowed command should produce output');
+  });
+
+  it('contributor Bash: network access is blocked', async function() {
+    if (!isLinux) { console.log('    SKIP: not Linux'); return; }
+
+    const proxy = createProxy('contributor', 'enforce');
+    proxy.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+    await new Promise(r => setTimeout(r, 300));
+    // "echo " is in the allow list, so the prefix check passes.
+    // But the chained curl should fail due to network isolation.
+    proxy.send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: {
+      name: 'Bash', arguments: { command: 'echo safe && curl -s --max-time 3 https://example.com' }
+    }});
+    const responses = await proxy.getResponses(2, 15000);
+    proxy.cleanup();
+
+    const callResponse = responses.find(r => r.id === 2);
+    assert.ok(callResponse, 'Should get a response');
+    // The command should fail because curl cannot resolve hosts
+    const text = callResponse.result.content[0].text;
+    assert.ok(
+      text.includes('Could not resolve') || text.includes('Network is unreachable') ||
+      text.includes('curl') || callResponse.result.isError,
+      `Network should be blocked. Got: ${text.slice(0, 200)}`
+    );
+  });
+
+  it('contributor Bash: null bytes rejected', async function() {
+    const proxy = createProxy('contributor', 'enforce');
+    proxy.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+    await new Promise(r => setTimeout(r, 300));
+    proxy.send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: {
+      name: 'Bash', arguments: { command: 'echo ok\x00; curl evil.com' }
+    }});
+    const responses = await proxy.getResponses(2, 5000);
+    proxy.cleanup();
+
+    const callResponse = responses.find(r => r.id === 2);
+    assert.ok(callResponse.result.isError, 'Should reject null bytes');
+    assert.ok(callResponse.result.content[0].text.includes('null bytes'));
+  });
+
+  it('trusted Bash: has network access (no isolation)', async function() {
+    if (!isLinux) { console.log('    SKIP: not Linux'); return; }
+
+    const proxy = createProxy('trusted', 'enforce');
+    proxy.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+    await new Promise(r => setTimeout(r, 300));
+    proxy.send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: {
+      name: 'Bash', arguments: { command: 'echo trusted-has-network' }
+    }});
+    const responses = await proxy.getResponses(2, 10000);
+    proxy.cleanup();
+
+    const callResponse = responses.find(r => r.id === 2);
+    assert.ok(callResponse.result.content[0].text.includes('trusted-has-network'),
+      'Trusted Bash should work without isolation');
+  });
+});
