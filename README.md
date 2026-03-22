@@ -5,6 +5,7 @@
 ![Trust Badger](docs/diagrams/og-image.png)
 
 > Your CI/CD pipeline trusts AI agents. Trust Badger makes sure that trust isn't misplaced.
+> 
 
 Context-aware runtime enforcement for AI agents in CI/CD. Detects who triggered the workflow, assigns a trust level, and enforces tool policies through an MCP proxy with kernel-level sandboxing. Fork PRs get read-only tools. Contributors get an allow list with no network. Admins get full access.
 
