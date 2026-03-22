@@ -116,6 +116,8 @@ On Linux, contributor Bash commands run inside a triple sandbox:
 
 All three controls are kernel-enforced. The agent cannot bypass them via prompt injection.
 
+**Recommended org setting:** Disable "Allow GitHub Actions to create and approve pull requests" in your organization settings. If a prompt-injected agent uses `GITHUB_TOKEN` to approve and merge a malicious PR, this setting is the only thing stopping it. GitHub enables it by default.
+
 ## Known Limitations
 
 **Linux only.** Network isolation and filesystem sandboxing use Linux kernel features (network namespaces, bubblewrap). On macOS and Windows runners, contributor Bash relies on the command allow list only. 85%+ of GitHub Actions workflows run on Linux. This is the same limitation StepSecurity Harden-Runner ships with.
