@@ -66,6 +66,15 @@ All CI jobs pass, including a live Claude Code integration and real fork PR enfo
 ![Input Scanning: 4 findings](docs/diagrams/fork-pr-scan.png)
 
 <details>
+<summary>Full detection logs from the CI job</summary>
+
+![Trust Badger Setup Detection](docs/diagrams/trust-badget-setup-detection.png)
+
+Shows the complete chain: fork detected, untrusted assigned, bubblewrap installed, all 4 injection patterns caught (fake-context, [RESTORE CONTEXT], HTML comment targeting Claude, GITHUB_TOKEN exfiltration via curl).
+
+</details>
+
+<details>
 <summary>Proxy integration test logs</summary>
 
 ![Proxy Job Logs](docs/diagrams/proxy-job.png)
