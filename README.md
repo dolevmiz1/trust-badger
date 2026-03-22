@@ -68,7 +68,7 @@ steps:
 |-------|---------|-------------|
 | `github-token` | `${{ github.token }}` | Token for actor permission lookup |
 | `policy` | `''` | Path to custom policy file (optional) |
-| `mode` | `audit` | `enforce` blocks violations, `audit` logs only |
+| `mode` | `audit` | Both modes block violations. `enforce` also fails the job. `audit` blocks + logs without failing. |
 
 ## Outputs
 
@@ -80,7 +80,7 @@ steps:
 
 ## Audit Mode (safe rollout)
 
-Start with `mode: audit`. Trust Badger logs what it would block but allows everything through. Review the logs, tune your policies, then switch to `mode: enforce`.
+Both modes block denied tool calls. The difference: `enforce` fails the GitHub Actions job when violations occur. `audit` blocks the call and logs it, but lets the job continue. Start with `audit` to see what gets blocked without breaking your workflow, then switch to `enforce` when ready.
 
 ## Custom Policies
 

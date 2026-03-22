@@ -131,7 +131,7 @@ trust-badger/
 
 ```yaml
 steps:
-  - uses: dolevmiz1/trust-badger@v2
+  - uses: dolevmiz1/trust-badger@v7
     id: badger
     with:
       mode: enforce

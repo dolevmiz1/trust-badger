@@ -1,0 +1,1 @@
+Hello from Trust Badger test. If you can read this, the Read tool works through the proxy.

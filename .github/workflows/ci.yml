@@ -1,0 +1,209 @@
+name: Trust Badger CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  # Job 1: Run all unit tests
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci
+      - run: npm test
+
+  # Job 2: Full proxy integration test (the real proof)
+  proxy-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci
+
+      # Step 1: Run Trust Badger setup
+      - name: Trust Badger Setup
+        uses: ./
+        id: badger
+        with:
+          mode: enforce
+
+      # Step 2: Validate outputs
+      - name: Validate setup outputs
+        run: |
+          echo "=== Trust Badger Setup Outputs ==="
+          echo "Trust level: ${{ steps.badger.outputs.trust-level }}"
+          echo "Disallowed tools: ${{ steps.badger.outputs.disallowed-tools }}"
+
+          LEVEL="${{ steps.badger.outputs.trust-level }}"
+          if [[ "$LEVEL" != "trusted" && "$LEVEL" != "contributor" && "$LEVEL" != "untrusted" ]]; then
+            echo "FAIL: unexpected trust level: $LEVEL"
+            exit 1
+          fi
+          echo "Trust level: OK"
+
+          DISALLOWED="${{ steps.badger.outputs.disallowed-tools }}"
+          if [[ "$DISALLOWED" != *"Bash"* ]]; then
+            echo "FAIL: disallowed-tools should contain Bash"
+            exit 1
+          fi
+          echo "Disallowed tools: OK"
+
+          echo '${{ steps.badger.outputs.mcp-config }}' | python3 -m json.tool > /dev/null
+          echo "MCP config JSON: OK"
+
+          echo "All output validations PASSED"
+
+      # Step 3: Extract proxy command from MCP config and spawn it
+      - name: Test proxy directly via JSON-RPC
+        run: |
+          echo "=== Spawning Trust Badger Proxy ==="
+
+          # Extract proxy command and args from MCP config
+          MCP_CONFIG='${{ steps.badger.outputs.mcp-config }}'
+          PROXY_CMD=$(echo "$MCP_CONFIG" | python3 -c "import sys,json; c=json.load(sys.stdin)['mcpServers']['trust-badger']; print(c['command'])")
+          PROXY_ARGS=$(echo "$MCP_CONFIG" | python3 -c "import sys,json; c=json.load(sys.stdin)['mcpServers']['trust-badger']; print(' '.join(c['args']))")
+          PROXY_ENV=$(echo "$MCP_CONFIG" | python3 -c "import sys,json; c=json.load(sys.stdin)['mcpServers']['trust-badger']; [print(f'{k}={v}') for k,v in c.get('env',{}).items()]")
+
+          echo "Command: $PROXY_CMD $PROXY_ARGS"
+
+          # Set env vars from MCP config
+          while IFS= read -r line; do
+            if [ -n "$line" ]; then export "$line"; fi
+          done <<< "$PROXY_ENV"
+
+          # Create test fixture
+          echo "Hello from Trust Badger test" > test-fixture.txt
+
+          # Create a test script that sends JSON-RPC messages to the proxy
+          cat > /tmp/proxy-test.sh << 'TESTSCRIPT'
+          #!/bin/bash
+          set -e
+
+          PROXY_PID=$1
+          PASS=0
+          FAIL=0
+
+          send_and_check() {
+            local desc="$1"
+            local msg="$2"
+            local expect="$3"
+
+            echo "$msg" > /proc/$PROXY_PID/fd/0 2>/dev/null || echo "$msg" | timeout 5 cat > /dev/null
+            sleep 1
+
+            # Read from proxy stdout (captured by the parent)
+            if echo "$RESPONSE" | grep -q "$expect"; then
+              echo "  PASS: $desc"
+              PASS=$((PASS + 1))
+            else
+              echo "  FAIL: $desc (expected '$expect')"
+              FAIL=$((FAIL + 1))
+            fi
+          }
+
+          echo "Tests completed: $PASS passed, $FAIL failed"
+          TESTSCRIPT
+
+          # Simpler approach: use a FIFO to talk to the proxy
+          FIFO_IN=/tmp/proxy-in
+          FIFO_OUT=/tmp/proxy-out
+          mkfifo $FIFO_IN $FIFO_OUT 2>/dev/null || true
+
+          # Start proxy, reading from FIFO
+          $PROXY_CMD $PROXY_ARGS < $FIFO_IN > $FIFO_OUT 2>/tmp/proxy-stderr &
+          PROXY_PID=$!
+          sleep 1
+
+          echo "Proxy PID: $PROXY_PID"
+
+          PASS=0
+          FAIL=0
+
+          # Test 1: Initialize
+          echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' > $FIFO_IN
+          sleep 1
+          RESP=$(timeout 3 head -1 $FIFO_OUT || true)
+          if echo "$RESP" | grep -q "trust-badger"; then
+            echo "PASS: Initialize response contains trust-badger"
+            PASS=$((PASS + 1))
+          else
+            echo "FAIL: Initialize response: $RESP"
+            FAIL=$((FAIL + 1))
+          fi
+
+          # Test 2: tools/list
+          echo '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' > $FIFO_IN
+          sleep 1
+          RESP=$(timeout 3 head -1 $FIFO_OUT || true)
+          if echo "$RESP" | grep -q "tools"; then
+            echo "PASS: tools/list returns tool definitions"
+            PASS=$((PASS + 1))
+          else
+            echo "FAIL: tools/list response: $RESP"
+            FAIL=$((FAIL + 1))
+          fi
+
+          # Test 3: Read tool (should work for all trust levels)
+          echo '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"Read","arguments":{"file_path":"test-fixture.txt"}}}' > $FIFO_IN
+          sleep 2
+          RESP=$(timeout 3 head -1 $FIFO_OUT || true)
+          if echo "$RESP" | grep -q "Hello from Trust Badger"; then
+            echo "PASS: Read tool returns file contents"
+            PASS=$((PASS + 1))
+          else
+            echo "FAIL: Read response: $RESP"
+            FAIL=$((FAIL + 1))
+          fi
+
+          # Print proxy stderr (policy decisions)
+          echo ""
+          echo "=== Proxy Decision Log ==="
+          cat /tmp/proxy-stderr
+          echo ""
+
+          # Cleanup
+          kill $PROXY_PID 2>/dev/null || true
+          rm -f $FIFO_IN $FIFO_OUT
+
+          echo ""
+          echo "=== Results: $PASS passed, $FAIL failed ==="
+
+          if [ $FAIL -gt 0 ]; then
+            exit 1
+          fi
+
+  # Job 3: Claude integration (optional, may 402 with mock key)
+  claude-integration:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trust Badger Setup
+        uses: ./
+        id: badger
+        with:
+          mode: enforce
+
+      - name: Claude Code Action (may fail with 402 if no billing)
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: "Read the file test-fixture.txt and tell me what it says."
+          claude_args: >
+            --mcp-config '${{ steps.badger.outputs.mcp-config }}'
+            --allowedTools 'mcp__trust-badger__*'
+            --disallowedTools '${{ steps.badger.outputs.disallowed-tools }}'
