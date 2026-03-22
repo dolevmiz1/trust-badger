@@ -126,17 +126,15 @@ All three controls are kernel-enforced. The agent cannot bypass them via prompt 
 
 ## Why Not Rely on the LLM Alone?
 
-We tested what happens WITHOUT Trust Badger. A fork PR with a Clinejection-style payload was submitted to a workflow running `claude-code-action` with `allowed_non_write_users: "*"` and full Bash access.
+We tested what happens WITHOUT Trust Badger. A fork PR with a Clinejection-style payload was submitted to a vulnerable workflow running `claude-code-action` with `allowed_non_write_users: "*"`, `pull_request_target` (exposes secrets to forks), and full Bash access.
 
-Claude detected the attack and refused to execute it, posting: *"Security Alert: Prompt Injection Attack Detected. No credentials were leaked."*
+In this test, the malicious commands were not executed. The `claude-code-action` posted a comment identifying the attack. Whether this was caught by Claude's safety training, Anthropic's input sanitization in the action wrapper, or both is unclear.
 
-This is good. But it's not enough:
+But this does not mean the threat is solved:
 
-- LLM behavior is non-deterministic. A different prompt, model version, or more sophisticated payload might succeed. The real Clinejection attack (Feb 2026) proved Claude CAN be tricked.
-- Trust Badger provides **deterministic** enforcement. It blocks tools at the transport layer regardless of what the LLM decides.
-- Defense in depth: Claude's safety + Trust Badger = two independent layers.
-
-You should not have to rely on the LLM's judgment for security. That's what Trust Badger solves.
+- The real Clinejection attack (Feb 2026) used the same `claude-code-action` and succeeded in tricking Claude into running `npm install` from a malicious fork, leading to secret exfiltration and a supply chain compromise affecting 5M+ users.
+- LLM behavior is non-deterministic. A different payload, model version, or prompt structure might bypass the safety layer. Anthropic's own post-incident fixes prove the previous version was vulnerable.
+- Trust Badger provides **deterministic** enforcement at the transport layer. It does not depend on the LLM's judgment. Tools are blocked by kernel-level sandboxing, not by hoping the model refuses.
 
 ## Design
 
