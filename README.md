@@ -108,15 +108,23 @@ Shows the complete chain: fork detected, untrusted assigned, bubblewrap installe
 
 ## Security Model
 
-On Linux, contributor Bash commands run inside a triple sandbox:
+Trust Badger provides 5 layers of defense. Each is independent.
 
-1. **Bash allow list**: only permitted command prefixes (npm test, node, python, go test, etc). Everything else is blocked before execution.
-2. **Network namespace** (`unshare --net`): no internet access. `curl`, `wget`, and any exfiltration fails at the OS level. Loopback stays up for test servers.
-3. **Filesystem sandbox** (bubblewrap): protected paths (`.github/workflows/`, `CLAUDE.md`, `.cursorrules`, `.claude/`, etc.) are mounted read-only. Any command or language that tries to write to these paths gets "Read-only file system" from the kernel.
+**Layer 1: Input Scanning (early warning, not a security boundary)**
 
-All three controls are kernel-enforced. The agent cannot bypass them via prompt injection.
+Regex patterns detect known attack signatures (Clinejection, PromptPwnd, RoguePilot) in PR titles, bodies, commit messages, and dispatch payloads. This is a heuristic layer. Novel patterns or obfuscated variants will bypass it. This layer provides visibility and catches blatant injection attempts in tool arguments, but it is not the security boundary.
 
-**Recommended org setting:** Disable "Allow GitHub Actions to create and approve pull requests" in your organization settings. If a prompt-injected agent uses `GITHUB_TOKEN` to approve and merge a malicious PR, this setting is the only thing stopping it. GitHub enables it by default.
+**Layers 2-5: Deterministic Enforcement (the security boundary)**
+
+These layers do not depend on parsing attacker content:
+- **Trust Detection**: fork PR = untrusted. Admin = trusted. Based on GitHub API, not input content. Not bypassable by prompt injection.
+- **Policy Engine**: untrusted actors don't have Bash in their tool list. Contributors get an allow list. No amount of prompt crafting changes this.
+- **Network Isolation** (Linux): kernel network namespace. No internet. Not bypassable.
+- **Filesystem Sandbox** (Linux): bubblewrap read-only mounts. Kernel-enforced. Not bypassable.
+
+The agent cannot bypass Layers 2-5 via prompt injection because these layers operate at the OS/API level, not the application level.
+
+**Recommended org setting:** Disable "Allow GitHub Actions to create and approve pull requests" in your organization settings. `GITHUB_TOKEN` can approve PRs via the reviews API, and this setting is enabled by default. Trust Badger mitigates this for untrusted actors (no Bash) and contributors (`gh` not in the allow list), but the org setting provides an additional safeguard.
 
 ## Known Limitations
 

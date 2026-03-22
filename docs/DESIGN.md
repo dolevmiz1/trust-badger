@@ -97,9 +97,9 @@ Trust mapping:
 
 ![Defense Stack](diagrams/04_defense_stack.png)
 
-Trust Badger provides defense-in-depth through 5 layers. Each layer is independent. Any single layer can stop an attack.
+Trust Badger provides defense-in-depth through 5 layers. Each layer is independent.
 
-1. **Input Scanning** detects prompt injection patterns (fake errors, HTML comments, hidden Unicode, shell injection, exfiltration language) in PR titles, bodies, branch names, commit messages, issue bodies, comments, and dispatch payloads.
+1. **Input Scanning (heuristic, not a security boundary)** detects known prompt injection patterns (fake errors, HTML comments, hidden Unicode, shell injection, exfiltration language) in PR titles, bodies, branch names, commit messages, issue bodies, comments, and dispatch payloads. This is a regex-based early warning layer. Novel or obfuscated patterns will bypass it. It provides visibility and catches blatant injection in tool arguments, but it is not the security boundary.
 
 2. **Trust Detection** reads GitHub context and API to assign a trust level. Fork PRs and unknown actors are always untrusted. Bots are capped at contributor.
 
