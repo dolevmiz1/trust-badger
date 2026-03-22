@@ -6,7 +6,7 @@ const path = require('path');
 const { POLICIES } = require('./policies');
 const { RULES, SURFACE_RULES } = require('./patterns');
 
-const MAX_INPUT_LENGTH = 50000; // MED-01 fix
+const MAX_INPUT_LENGTH = 50000;
 
 async function run() {
   try {
@@ -16,7 +16,7 @@ async function run() {
     const octokit = github.getOctokit(token);
     const { context } = github;
 
-    // LOW-02 fix: validate mode
+    // Validate mode
     const validModes = ['enforce', 'audit'];
     const mode = validModes.includes(rawMode) ? rawMode : 'audit';
     if (rawMode !== mode) {
@@ -31,17 +31,15 @@ async function run() {
     // Step 2: Resolve policy
     let policy = { ...POLICIES[trustLevel] };
 
-    // CRIT-03 fix: custom policies can only ADD deny rules, not replace allow/denyAll
+    // Custom policies can only ADD deny rules
     if (customPolicyPath && fs.existsSync(customPolicyPath)) {
       core.info(`Loading custom policy from ${customPolicyPath}`);
       try {
         const custom = JSON.parse(fs.readFileSync(customPolicyPath, 'utf-8'));
         if (custom[trustLevel] && Array.isArray(custom[trustLevel].deny)) {
-          // Merge deny rules (additive only, cannot remove defaults)
           policy.deny = [...policy.deny, ...custom[trustLevel].deny];
           core.info(`Added ${custom[trustLevel].deny.length} custom deny rule(s)`);
         }
-        // Ignore attempts to change allow, denyAll, or label
         if (custom[trustLevel]?.allow || custom[trustLevel]?.denyAll !== undefined) {
           core.warning('Custom policies cannot modify allow lists or denyAll. Only additional deny rules are accepted.');
         }
@@ -49,9 +47,6 @@ async function run() {
         core.warning(`Failed to parse custom policy: ${e.message}`);
       }
     }
-
-    // MED-03 fix: remove .trust-badger.yml detection (was detected but never loaded)
-    // Will implement in a future version with proper schema validation
 
     // Step 3: Run input scanning (Layer 1)
     const inputFindings = await scanInputs(octokit, context);
@@ -62,7 +57,7 @@ async function run() {
       }
     }
 
-    // CRIT-04 fix: random filename for policy file
+    // Step 4: Write policy file (random filename + HMAC)
     const policyId = crypto.randomBytes(16).toString('hex');
     const policyFile = path.join(
       process.env.RUNNER_TEMP || '/tmp',
@@ -84,11 +79,11 @@ async function run() {
     const policyJson = JSON.stringify(policyData, null, 2);
     fs.writeFileSync(policyFile, policyJson);
 
-    // HMAC for integrity verification with runtime-generated key
     const hmacKey = crypto.randomBytes(32).toString('hex');
     const hmac = crypto.createHmac('sha256', hmacKey)
       .update(policyJson).digest('hex');
 
+    // Step 5: Output MCP config + disallowed tools
     const proxyPath = path.resolve(__dirname, 'proxy.js');
     const mcpConfig = JSON.stringify({
       mcpServers: {
@@ -105,9 +100,14 @@ async function run() {
 
     core.setOutput('mcp-config', mcpConfig);
     core.setOutput('violations', '0');
-    core.info('MCP proxy config ready. Pass it to your agent via --mcp-config.');
 
-    // Step 4: Write summary
+    // Output disallowed-tools so native tools are blocked
+    core.setOutput('disallowed-tools', 'Bash,Read,Write,Edit,Glob,Grep');
+
+    core.info('MCP proxy config ready.');
+    core.info('IMPORTANT: Use --disallowedTools with the value from the disallowed-tools output to prevent the agent from bypassing the proxy.');
+
+    // Step 6: Write summary
     const summaryFile = process.env.GITHUB_STEP_SUMMARY;
     if (summaryFile) {
       const summary = [
@@ -134,22 +134,33 @@ async function detectTrustLevel(octokit, context) {
   const eventName = process.env.GITHUB_EVENT_NAME;
   const { owner, repo } = context.repo;
 
+  // Deleted fork: head.repo is null when the source repo is deleted
+  if (context.payload.pull_request && !context.payload.pull_request.head?.repo) {
+    core.info(`PR source repo is null (deleted fork). Untrusted.`);
+    return 'untrusted';
+  }
+
   // Fork PR is always untrusted
   if (context.payload.pull_request?.head?.repo?.fork) {
     core.info(`Fork PR detected (actor: ${actor})`);
     return 'untrusted';
   }
 
-  // HIGH-04 fix: pull_request_target from ANY fork is untrusted, regardless of actor permissions.
-  // This event is inherently high-risk because it runs with base branch secrets.
+  // pull_request_target from any fork is untrusted (high risk event)
   if (eventName === 'pull_request_target') {
     const prHead = context.payload.pull_request?.head;
     const prBase = context.payload.pull_request?.base;
-    if (prHead?.repo?.full_name !== prBase?.repo?.full_name) {
-      core.info(`pull_request_target from fork: ${prHead?.repo?.full_name}. Untrusted.`);
+    if (!prHead?.repo || prHead.repo.full_name !== prBase?.repo?.full_name) {
+      core.info(`pull_request_target from fork or deleted repo. Untrusted.`);
       return 'untrusted';
     }
   }
+
+  // Bot actors are capped at contributor (never trusted)
+  const actorType = context.payload.sender?.type ||
+    context.payload.pull_request?.user?.type ||
+    context.payload.issue?.user?.type;
+  const isBot = actorType === 'Bot' || (actor && actor.endsWith('[bot]'));
 
   // Check actor's permission level via API
   try {
@@ -157,14 +168,28 @@ async function detectTrustLevel(octokit, context) {
       owner, repo, username: actor,
     });
 
-    const permission = data.permission;
-    core.info(`Actor ${actor} has '${permission}' permission`);
+    // Prefer role_name (5 levels) over permission (4 levels)
+    const role = data.role_name || data.permission;
+    core.info(`Actor ${actor} has '${role}' role (type: ${actorType || 'User'})`);
 
-    if (permission === 'admin' || permission === 'write') {
+    // Trust mapping:
+    //   admin = trusted (unless bot)
+    //   write, maintain = contributor
+    //   read, triage = untrusted
+    //   none = untrusted
+
+    if (role === 'admin' && !isBot) {
       return 'trusted';
     }
-    if (permission === 'read') {
+    if (role === 'admin' && isBot) {
+      core.info(`Bot actor with admin permission capped at contributor.`);
       return 'contributor';
+    }
+    if (role === 'write' || role === 'maintain') {
+      return 'contributor';
+    }
+    if (role === 'read' || role === 'triage') {
+      return 'untrusted';
     }
     return 'untrusted';
   } catch (e) {
@@ -173,18 +198,18 @@ async function detectTrustLevel(octokit, context) {
   }
 }
 
-// MED-04 fix: also scan commit messages
 async function scanInputs(octokit, context) {
   const findings = [];
   const pr = context.payload.pull_request;
   const issue = context.payload.issue;
+  const comment = context.payload.comment;
 
   if (pr) {
     scanText(pr.title || '', 'prTitle', 'PR title', findings);
     scanText(pr.body || '', 'prBody', 'PR body', findings);
     scanText(pr.head?.ref || '', 'branchName', 'Branch name', findings);
 
-    // MED-04 fix: scan commit messages
+    // Scan commit messages
     try {
       const { owner, repo } = context.repo;
       const { data: commits } = await octokit.rest.pulls.listCommits({
@@ -203,15 +228,30 @@ async function scanInputs(octokit, context) {
     scanText(issue.body || '', 'issueBody', 'Issue body', findings);
   }
 
+  // Scan issue_comment body
+  if (comment) {
+    scanText(comment.body || '', 'issueBody', 'Comment body', findings);
+  }
+
+  // Scan workflow_dispatch inputs
+  if (context.payload.inputs) {
+    const inputStr = JSON.stringify(context.payload.inputs);
+    scanText(inputStr, 'prBody', 'workflow_dispatch inputs', findings);
+  }
+
+  // Scan repository_dispatch client_payload
+  if (context.payload.client_payload) {
+    const payloadStr = JSON.stringify(context.payload.client_payload);
+    scanText(payloadStr, 'prBody', 'repository_dispatch payload', findings);
+  }
+
   return findings;
 }
 
 function scanText(text, surface, locationLabel, findings) {
   if (!text || text.length === 0) return;
 
-  // MED-01 fix: cap input length before regex
   const capped = text.slice(0, MAX_INPUT_LENGTH);
-
   const applicableRuleIds = SURFACE_RULES[surface] || [];
 
   for (const rule of RULES) {

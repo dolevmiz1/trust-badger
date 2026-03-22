@@ -4,6 +4,9 @@ branding:
   icon: 'shield'
   color: 'purple'
 
+# Required permissions: contents:read, pull-requests:write (for PR comments)
+# The github-token must have sufficient scope to check actor permissions.
+
 inputs:
   github-token:
     description: 'GitHub token for actor permission lookup'
@@ -12,7 +15,7 @@ inputs:
     description: 'Path to custom policy file (optional)'
     default: ''
   mode:
-    description: 'enforce (block violations) or audit (log only)'
+    description: 'enforce (block violations) or audit (block + log without failing job)'
     default: 'audit'
 
 outputs:
@@ -21,7 +24,9 @@ outputs:
   violations:
     description: 'Number of blocked tool calls'
   mcp-config:
-    description: 'MCP config JSON to pass to the agent'
+    description: 'MCP config JSON to pass to the agent via --mcp-config'
+  disallowed-tools:
+    description: 'Native tools to disable via --disallowedTools (prevents proxy bypass)'
 
 runs:
   using: 'node20'

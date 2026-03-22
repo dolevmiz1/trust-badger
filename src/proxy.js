@@ -162,14 +162,19 @@ function executeTool(toolName, toolArgs) {
     switch (toolName) {
       case 'Bash': {
         const cmd = toolArgs.command || '';
-        const output = execSync(cmd, {
-          encoding: 'utf-8',
-          timeout: 30000,
-          maxBuffer: 1024 * 1024,
-          stdio: ['pipe', 'pipe', 'pipe'],
-          cwd: workspace,
-        });
-        return { content: [{ type: 'text', text: output }] };
+        try {
+          const output = execSync(cmd, {
+            encoding: 'utf-8',
+            timeout: 120000,
+            maxBuffer: 4 * 1024 * 1024,
+            cwd: workspace,
+          });
+          return { content: [{ type: 'text', text: output }] };
+        } catch (e) {
+          // execSync throws on non-zero exit. Return combined stdout+stderr.
+          const combined = (e.stdout || '') + (e.stderr ? '\nSTDERR:\n' + e.stderr : '');
+          return { content: [{ type: 'text', text: combined || e.message }], isError: true };
+        }
       }
 
       case 'Read': {
@@ -189,8 +194,8 @@ function executeTool(toolName, toolArgs) {
         const filePath = resolveAndValidatePath(toolArgs.file_path, workspace);
         let content = fs.readFileSync(filePath, 'utf-8');
         if (toolArgs.old_string && content.includes(toolArgs.old_string)) {
-          // Fix: replaceAll instead of replace (replaces ALL occurrences)
-          content = content.split(toolArgs.old_string).join(toolArgs.new_string || '');
+          // Replace first occurrence only (matches Claude Code Edit semantics)
+          content = content.replace(toolArgs.old_string, toolArgs.new_string || '');
           fs.writeFileSync(filePath, content);
           return { content: [{ type: 'text', text: `File edited: ${filePath}` }] };
         }
