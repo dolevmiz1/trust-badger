@@ -124,6 +124,20 @@ All three controls are kernel-enforced. The agent cannot bypass them via prompt 
 
 **Trusted level has no restrictions.** Repo admins get full tool access by design. If an admin account is compromised, Trust Badger cannot help. This matches GitHub's own threat model.
 
+## Why Not Rely on the LLM Alone?
+
+We tested what happens WITHOUT Trust Badger. A fork PR with a Clinejection-style payload was submitted to a workflow running `claude-code-action` with `allowed_non_write_users: "*"` and full Bash access.
+
+Claude detected the attack and refused to execute it, posting: *"Security Alert: Prompt Injection Attack Detected. No credentials were leaked."*
+
+This is good. But it's not enough:
+
+- LLM behavior is non-deterministic. A different prompt, model version, or more sophisticated payload might succeed. The real Clinejection attack (Feb 2026) proved Claude CAN be tricked.
+- Trust Badger provides **deterministic** enforcement. It blocks tools at the transport layer regardless of what the LLM decides.
+- Defense in depth: Claude's safety + Trust Badger = two independent layers.
+
+You should not have to rely on the LLM's judgment for security. That's what Trust Badger solves.
+
 ## Design
 
 See [docs/DESIGN.md](docs/DESIGN.md) for architecture diagrams and the full design rationale.
