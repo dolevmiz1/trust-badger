@@ -65,124 +65,75 @@ jobs:
 
           echo "All output validations PASSED"
 
-      # Step 3: Extract proxy command from MCP config and spawn it
+      # Step 3: Test proxy via Node.js script (sends JSON-RPC over stdio)
       - name: Test proxy directly via JSON-RPC
+        timeout-minutes: 3
         run: |
-          echo "=== Spawning Trust Badger Proxy ==="
-
-          # Extract proxy command and args from MCP config
-          MCP_CONFIG='${{ steps.badger.outputs.mcp-config }}'
-          PROXY_CMD=$(echo "$MCP_CONFIG" | python3 -c "import sys,json; c=json.load(sys.stdin)['mcpServers']['trust-badger']; print(c['command'])")
-          PROXY_ARGS=$(echo "$MCP_CONFIG" | python3 -c "import sys,json; c=json.load(sys.stdin)['mcpServers']['trust-badger']; print(' '.join(c['args']))")
-          PROXY_ENV=$(echo "$MCP_CONFIG" | python3 -c "import sys,json; c=json.load(sys.stdin)['mcpServers']['trust-badger']; [print(f'{k}={v}') for k,v in c.get('env',{}).items()]")
-
-          echo "Command: $PROXY_CMD $PROXY_ARGS"
-
-          # Set env vars from MCP config
-          while IFS= read -r line; do
-            if [ -n "$line" ]; then export "$line"; fi
-          done <<< "$PROXY_ENV"
-
-          # Create test fixture
           echo "Hello from Trust Badger test" > test-fixture.txt
 
-          # Create a test script that sends JSON-RPC messages to the proxy
-          cat > /tmp/proxy-test.sh << 'TESTSCRIPT'
-          #!/bin/bash
-          set -e
+          # Write a Node script that spawns the proxy and tests it
+          cat > /tmp/test-proxy.mjs << 'SCRIPT'
+          import { spawn } from 'child_process';
 
-          PROXY_PID=$1
-          PASS=0
-          FAIL=0
+          const mcpConfig = JSON.parse(process.argv[2]);
+          const server = mcpConfig.mcpServers['trust-badger'];
 
-          send_and_check() {
-            local desc="$1"
-            local msg="$2"
-            local expect="$3"
+          const proc = spawn(server.command, server.args, {
+            env: { ...process.env, ...server.env },
+            stdio: ['pipe', 'pipe', 'pipe'],
+          });
 
-            echo "$msg" > /proc/$PROXY_PID/fd/0 2>/dev/null || echo "$msg" | timeout 5 cat > /dev/null
-            sleep 1
+          let stdout = '';
+          let stderr = '';
+          proc.stdout.on('data', d => { stdout += d.toString(); });
+          proc.stderr.on('data', d => { stderr += d.toString(); });
 
-            # Read from proxy stdout (captured by the parent)
-            if echo "$RESPONSE" | grep -q "$expect"; then
-              echo "  PASS: $desc"
-              PASS=$((PASS + 1))
-            else
-              echo "  FAIL: $desc (expected '$expect')"
-              FAIL=$((FAIL + 1))
-            fi
+          function send(msg) { proc.stdin.write(JSON.stringify(msg) + '\n'); }
+          function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+          function getResponses() {
+            return stdout.split('\n').filter(Boolean).map(l => { try { return JSON.parse(l); } catch(e) { return null; } }).filter(Boolean);
           }
 
-          echo "Tests completed: $PASS passed, $FAIL failed"
-          TESTSCRIPT
+          let pass = 0, fail = 0;
+          function check(desc, condition) {
+            if (condition) { console.log(`  PASS: ${desc}`); pass++; }
+            else { console.log(`  FAIL: ${desc}`); fail++; }
+          }
 
-          # Simpler approach: use a FIFO to talk to the proxy
-          FIFO_IN=/tmp/proxy-in
-          FIFO_OUT=/tmp/proxy-out
-          mkfifo $FIFO_IN $FIFO_OUT 2>/dev/null || true
+          // Test 1: Initialize
+          send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+          await sleep(1000);
 
-          # Start proxy, reading from FIFO
-          $PROXY_CMD $PROXY_ARGS < $FIFO_IN > $FIFO_OUT 2>/tmp/proxy-stderr &
-          PROXY_PID=$!
-          sleep 1
+          let resps = getResponses();
+          check('Initialize response', resps.some(r => r.id === 1 && r.result?.serverInfo?.name === 'trust-badger'));
 
-          echo "Proxy PID: $PROXY_PID"
+          // Test 2: tools/list
+          send({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
+          await sleep(1000);
 
-          PASS=0
-          FAIL=0
+          resps = getResponses();
+          const toolsList = resps.find(r => r.id === 2);
+          check('tools/list returns tools', toolsList?.result?.tools?.length > 0);
 
-          # Test 1: Initialize
-          echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' > $FIFO_IN
-          sleep 1
-          RESP=$(timeout 3 head -1 $FIFO_OUT || true)
-          if echo "$RESP" | grep -q "trust-badger"; then
-            echo "PASS: Initialize response contains trust-badger"
-            PASS=$((PASS + 1))
-          else
-            echo "FAIL: Initialize response: $RESP"
-            FAIL=$((FAIL + 1))
-          fi
+          // Test 3: Read tool
+          send({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'Read', arguments: { file_path: 'test-fixture.txt' } } });
+          await sleep(2000);
 
-          # Test 2: tools/list
-          echo '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' > $FIFO_IN
-          sleep 1
-          RESP=$(timeout 3 head -1 $FIFO_OUT || true)
-          if echo "$RESP" | grep -q "tools"; then
-            echo "PASS: tools/list returns tool definitions"
-            PASS=$((PASS + 1))
-          else
-            echo "FAIL: tools/list response: $RESP"
-            FAIL=$((FAIL + 1))
-          fi
+          resps = getResponses();
+          const readResp = resps.find(r => r.id === 3);
+          check('Read tool returns file contents', readResp?.result?.content?.[0]?.text?.includes('Hello from Trust Badger'));
 
-          # Test 3: Read tool (should work for all trust levels)
-          echo '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"Read","arguments":{"file_path":"test-fixture.txt"}}}' > $FIFO_IN
-          sleep 2
-          RESP=$(timeout 3 head -1 $FIFO_OUT || true)
-          if echo "$RESP" | grep -q "Hello from Trust Badger"; then
-            echo "PASS: Read tool returns file contents"
-            PASS=$((PASS + 1))
-          else
-            echo "FAIL: Read response: $RESP"
-            FAIL=$((FAIL + 1))
-          fi
+          // Print proxy decision log
+          console.log('\n=== Proxy Decision Log ===');
+          console.log(stderr);
 
-          # Print proxy stderr (policy decisions)
-          echo ""
-          echo "=== Proxy Decision Log ==="
-          cat /tmp/proxy-stderr
-          echo ""
+          proc.kill();
 
-          # Cleanup
-          kill $PROXY_PID 2>/dev/null || true
-          rm -f $FIFO_IN $FIFO_OUT
+          console.log(`\n=== Results: ${pass} passed, ${fail} failed ===`);
+          process.exit(fail > 0 ? 1 : 0);
+          SCRIPT
 
-          echo ""
-          echo "=== Results: $PASS passed, $FAIL failed ==="
-
-          if [ $FAIL -gt 0 ]; then
-            exit 1
-          fi
+          node /tmp/test-proxy.mjs '${{ steps.badger.outputs.mcp-config }}'
 
   # Job 3: Claude integration (optional, may 402 with mock key)
   claude-integration:
