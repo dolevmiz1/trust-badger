@@ -737,8 +737,16 @@ function normalizeToolName(name) {
 }
 
 function getAvailableTools() {
+  // Bash description changes based on policy: tell the agent WHAT it can do, not WHY.
+  // This reduces wasted tokens and turns (Claude Code SDK issue #21773).
+  const bashDesc = policy.bashMode === 'allowlist'
+    ? 'Execute an allowed command (npm test, npm run, node, python, go test, cargo test, make, jest, eslint, git status/log/diff). Other commands are blocked.'
+    : policy.bashMode === 'none'
+      ? 'Not available'
+      : 'Execute a shell command';
+
   const allTools = [
-    { name: 'Bash', description: 'Execute a shell command', inputSchema: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] } },
+    { name: 'Bash', description: bashDesc, inputSchema: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] } },
     { name: 'Read', description: 'Read a file', inputSchema: { type: 'object', properties: { file_path: { type: 'string' } }, required: ['file_path'] } },
     { name: 'Write', description: 'Write a file', inputSchema: { type: 'object', properties: { file_path: { type: 'string' }, content: { type: 'string' } }, required: ['file_path', 'content'] } },
     { name: 'Edit', description: 'Edit a file', inputSchema: { type: 'object', properties: { file_path: { type: 'string' }, old_string: { type: 'string' }, new_string: { type: 'string' } }, required: ['file_path', 'old_string', 'new_string'] } },
@@ -748,6 +756,7 @@ function getAvailableTools() {
     { name: 'WebSearch', description: 'Search the web', inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } },
   ];
 
+  // Filter: only show tools the agent can actually use (reduces token waste)
   if (policy.denyAll) {
     return allTools.filter(t => policy.allow.includes(t.name));
   }
