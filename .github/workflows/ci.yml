@@ -140,6 +140,11 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
@@ -149,11 +154,11 @@ jobs:
         with:
           mode: enforce
 
-      - name: Claude Code Action (may fail with 402 if no billing)
+      - name: Claude Code Action
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          prompt: "Read the file test-fixture.txt and tell me what it says."
+          prompt: "Read the file test-fixture.txt and tell me what it says. Use the Read tool."
           claude_args: >
             --mcp-config '${{ steps.badger.outputs.mcp-config }}'
             --allowedTools 'mcp__trust-badger__*'
