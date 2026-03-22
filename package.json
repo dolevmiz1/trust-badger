@@ -5,7 +5,7 @@
   "main": "src/setup.js",
   "scripts": {
     "build": "ncc build src/setup.js -o dist && ncc build src/proxy.js -o dist/proxy-bundle && cp dist/proxy-bundle/index.js dist/proxy.js && rm -rf dist/proxy-bundle",
-    "test": "node --test tests/policies.test.js tests/proxy.test.js tests/clinejection.e2e.test.js"
+    "test": "node --test tests/policies.test.js tests/proxy.test.js tests/clinejection.e2e.test.js tests/trust-detection.test.js"
   },
   "keywords": ["github-action", "security", "mcp-proxy", "ai-agent", "ci-cd", "runtime-enforcement"],
   "license": "Apache-2.0",

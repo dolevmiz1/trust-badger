@@ -135,7 +135,52 @@ jobs:
 
           node /tmp/test-proxy.mjs '${{ steps.badger.outputs.mcp-config }}'
 
-  # Job 3: Claude integration (optional, may 402 with mock key)
+  # Job 3: Untrusted enforcement test (simulated fork PR)
+  test-untrusted-enforcement:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm install
+
+      - name: Create fake fork PR event payload
+        run: |
+          cat > /tmp/fake-fork-event.json << 'PAYLOAD'
+          {
+            "action": "opened",
+            "pull_request": {
+              "number": 999,
+              "title": "Test from fork",
+              "body": "",
+              "head": { "ref": "evil-branch", "repo": { "fork": true, "full_name": "attacker/trust-badger" } },
+              "base": { "ref": "main", "repo": { "full_name": "dolevmiz1/trust-badger" } },
+              "user": { "login": "attacker", "type": "User" }
+            },
+            "sender": { "login": "attacker", "type": "User" }
+          }
+          PAYLOAD
+
+      - name: Verify fork PR gets untrusted trust level
+        run: |
+          GITHUB_EVENT_PATH=/tmp/fake-fork-event.json \
+          GITHUB_EVENT_NAME=pull_request \
+          GITHUB_ACTOR=attacker \
+          GITHUB_TRIGGERING_ACTOR=attacker \
+          GITHUB_REPOSITORY=dolevmiz1/trust-badger \
+          RUNNER_TEMP=$RUNNER_TEMP \
+          node src/setup.js 2>&1 | tee /tmp/setup-output.txt
+
+          if grep -q "Trust level: untrusted" /tmp/setup-output.txt; then
+            echo "PASS: Fork PR correctly assigned untrusted"
+          else
+            echo "FAIL: Expected untrusted trust level"
+            cat /tmp/setup-output.txt
+            exit 1
+          fi
+
+  # Job 4: Claude integration (optional, may 402 with mock key)
   claude-integration:
     runs-on: ubuntu-latest
     continue-on-error: true

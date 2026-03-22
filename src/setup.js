@@ -146,9 +146,24 @@ async function run() {
 }
 
 async function detectTrustLevel(octokit, context) {
-  const actor = process.env.GITHUB_TRIGGERING_ACTOR || process.env.GITHUB_ACTOR;
+  // P0-C fix: use nullish coalescing (empty string is a valid actor name)
+  const actor = process.env.GITHUB_TRIGGERING_ACTOR ?? process.env.GITHUB_ACTOR;
   const eventName = process.env.GITHUB_EVENT_NAME;
-  const { owner, repo } = context.repo;
+
+  // P0-A fix: wrap context.repo in try/catch (crashes if GITHUB_REPOSITORY is missing)
+  let owner, repo;
+  try {
+    ({ owner, repo } = context.repo);
+  } catch (e) {
+    core.warning(`Could not determine repository: ${e.message}. Defaulting to untrusted.`);
+    return 'untrusted';
+  }
+
+  // P0-B fix: schedule events run from the repo's own cron, no external input
+  if (eventName === 'schedule') {
+    core.info('Schedule event: defaulting to trusted (no external input).');
+    return 'trusted';
+  }
 
   // Deleted fork: head.repo is null when the source repo is deleted
   if (context.payload.pull_request && !context.payload.pull_request.head?.repo) {
@@ -306,4 +321,10 @@ function scanText(text, surface, locationLabel, findings) {
   }
 }
 
-run();
+// Auto-execute when run as main entry point (GitHub Action)
+// Export detectTrustLevel for unit testing
+if (require.main === module) {
+  run();
+}
+
+module.exports = { detectTrustLevel };
