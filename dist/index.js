@@ -32160,6 +32160,22 @@ async function run() {
     core.info(`Trust level: ${trustLevel}`);
     core.setOutput('trust-level', trustLevel);
 
+    // Install bubblewrap for filesystem sandboxing (Linux, non-trusted only)
+    if (process.platform === 'linux' && trustLevel !== 'trusted') {
+      try {
+        (__nccwpck_require__(5317).execFileSync)('which', ['bwrap'], { stdio: 'ignore' });
+        core.info('bubblewrap already installed.');
+      } catch (e) {
+        core.info('Installing bubblewrap for filesystem sandboxing...');
+        try {
+          (__nccwpck_require__(5317).execSync)('sudo apt-get install -y -qq bubblewrap 2>/dev/null', { stdio: 'ignore', timeout: 30000 });
+          core.info('bubblewrap installed.');
+        } catch (installErr) {
+          core.warning('Could not install bubblewrap. Filesystem sandboxing will be unavailable.');
+        }
+      }
+    }
+
     // Step 2: Resolve policy
     let policy = { ...POLICIES[trustLevel] };
 

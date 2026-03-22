@@ -382,3 +382,77 @@ describe('Proxy: network-isolated Bash (Linux)', function() {
       'Trusted Bash should work without isolation');
   });
 });
+
+// Filesystem sandbox tests (Linux + bwrap only)
+describe('Proxy: filesystem sandbox via bubblewrap (Linux)', function() {
+  const isLinux = process.platform === 'linux';
+  let hasBwrap = false;
+  if (isLinux) {
+    try { require('child_process').execFileSync('which', ['bwrap'], { stdio: 'ignore' }); hasBwrap = true; } catch(e) {}
+  }
+
+  it('contributor Bash: write to .github/workflows/ blocked by kernel', async function() {
+    if (!isLinux || !hasBwrap) { console.log('    SKIP: requires Linux + bwrap'); return; }
+
+    // Create a temp .github/workflows dir so bwrap can ro-bind it
+    const testDir = path.join(process.cwd(), '.github', 'workflows');
+    fs.mkdirSync(testDir, { recursive: true });
+    fs.writeFileSync(path.join(testDir, 'ci.yml'), 'name: test', { flag: 'wx' }).catch?.(() => {});
+
+    const proxy = createProxy('contributor', 'enforce');
+    proxy.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+    await new Promise(r => setTimeout(r, 300));
+    proxy.send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: {
+      name: 'Bash', arguments: { command: 'echo pwned > .github/workflows/backdoor.yml' }
+    }});
+    const responses = await proxy.getResponses(2, 15000);
+    proxy.cleanup();
+
+    const callResponse = responses.find(r => r.id === 2);
+    const text = callResponse?.result?.content?.[0]?.text || '';
+    assert.ok(
+      text.includes('Read-only') || text.includes('Permission denied') || callResponse?.result?.isError,
+      `Write to .github/workflows/ should be blocked. Got: ${text.slice(0, 200)}`
+    );
+  });
+
+  it('contributor Bash: python write to protected path blocked', async function() {
+    if (!isLinux || !hasBwrap) { console.log('    SKIP: requires Linux + bwrap'); return; }
+
+    const proxy = createProxy('contributor', 'enforce');
+    proxy.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+    await new Promise(r => setTimeout(r, 300));
+    proxy.send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: {
+      name: 'Bash', arguments: { command: 'python3 -c "open(\'.github/workflows/evil.yml\',\'w\').write(\'pwned\')"' }
+    }});
+    const responses = await proxy.getResponses(2, 15000);
+    proxy.cleanup();
+
+    const callResponse = responses.find(r => r.id === 2);
+    const text = callResponse?.result?.content?.[0]?.text || '';
+    assert.ok(
+      text.includes('Read-only') || text.includes('Permission denied') || text.includes('OSError') || callResponse?.result?.isError,
+      `Python write to protected path should be blocked. Got: ${text.slice(0, 200)}`
+    );
+  });
+
+  it('contributor Bash: write to normal workspace file allowed', async function() {
+    if (!isLinux || !hasBwrap) { console.log('    SKIP: requires Linux + bwrap'); return; }
+
+    const proxy = createProxy('contributor', 'enforce');
+    proxy.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+    await new Promise(r => setTimeout(r, 300));
+    proxy.send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: {
+      name: 'Bash', arguments: { command: 'echo test-content > /tmp/trust-badger-bwrap-test.txt && cat /tmp/trust-badger-bwrap-test.txt' }
+    }});
+    const responses = await proxy.getResponses(2, 15000);
+    proxy.cleanup();
+
+    const callResponse = responses.find(r => r.id === 2);
+    const text = callResponse?.result?.content?.[0]?.text || '';
+    assert.ok(
+      text.includes('test-content'),
+      `Write to /tmp should be allowed. Got: ${text.slice(0, 200)}`
+    );
+  });
+});

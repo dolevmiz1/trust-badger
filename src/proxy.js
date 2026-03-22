@@ -168,10 +168,10 @@ function executeTool(toolName, toolArgs) {
           return { content: [{ type: 'text', text: 'Command rejected: contains null bytes' }], isError: true };
         }
 
-        // Network-isolated execution for contributor on Linux.
-        // Writes command to a temp file (no shell escaping needed),
-        // runs it inside a network namespace with no internet access.
-        // Loopback stays up so localhost-based test servers work.
+        // Sandboxed execution for contributor on Linux:
+        // 1. Network namespace (unshare --net): no internet access
+        // 2. Filesystem sandbox (bubblewrap): protected paths are read-only
+        // Command is written to temp file (no shell escaping issues).
         if (process.platform === 'linux' && policy.bashMode === 'allowlist') {
           const tmpScript = path.join(workspace, `.trust-badger-cmd-${process.pid}-${Date.now()}.sh`);
           try {
@@ -179,7 +179,47 @@ function executeTool(toolName, toolArgs) {
             const { execFileSync } = require('child_process');
             const envVars = 'PATH,HOME,NODE_PATH,PYTHONPATH,GOPATH,CARGO_HOME,npm_config_cache,LANG,TERM';
             const user = process.env.USER || 'runner';
-            const innerCmd = `ip link set lo up && sudo --preserve-env=${envVars} -u ${user} bash ${tmpScript}`;
+
+            // Protected paths: read-only inside sandbox (kernel-enforced via bwrap)
+            const protectedPaths = [
+              '.github', 'CLAUDE.md', '.cursorrules', '.cursorignore',
+              '.clinerules', '.clineignore', 'AGENTS.md', 'AGENTS.yaml',
+              '.windsurfrules', '.claude',
+            ];
+
+            // Check if bwrap is available
+            let hasBwrap = false;
+            try {
+              execFileSync('which', ['bwrap'], { stdio: 'ignore' });
+              hasBwrap = true;
+            } catch (e) { /* bwrap not installed */ }
+
+            let innerCmd;
+            if (hasBwrap) {
+              // Build bwrap args: ro-bind everything, writable workspace, protected paths re-bound as ro
+              const bwrapParts = [
+                'bwrap',
+                '--ro-bind', '/', '/',
+                '--dev', '/dev',
+                '--proc', '/proc',
+                '--tmpfs', '/tmp',
+                '--bind', workspace, workspace,
+              ];
+              for (const p of protectedPaths) {
+                const fullPath = path.join(workspace, p);
+                if (fs.existsSync(fullPath)) {
+                  bwrapParts.push('--ro-bind', fullPath, fullPath);
+                }
+              }
+              bwrapParts.push('--', 'bash', tmpScript);
+              const bwrapCmd = bwrapParts.map(a => `'${a}'`).join(' ');
+              innerCmd = `ip link set lo up && sudo --preserve-env=${envVars} -u ${user} ${bwrapCmd}`;
+            } else {
+              // Fallback: network isolation only (no filesystem protection)
+              process.stderr.write('[Trust Badger] bwrap not available, using network isolation only\n');
+              innerCmd = `ip link set lo up && sudo --preserve-env=${envVars} -u ${user} bash ${tmpScript}`;
+            }
+
             const output = execFileSync('sudo', ['unshare', '--net', 'sh', '-c', innerCmd], {
               encoding: 'utf-8',
               timeout: 120000,

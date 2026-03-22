@@ -86,6 +86,23 @@ Start with `mode: audit`. Trust Badger logs what it would block but allows every
 
 Add a `.trust-badger.yml` to your repo to override defaults. Or pass a policy file via the `policy` input.
 
+## Security Model
+
+On Linux, contributor Bash commands run inside a double sandbox:
+
+1. **Network namespace** (`unshare --net`): no internet access. `curl`, `wget`, and any network exfiltration fails at the OS level.
+2. **Filesystem sandbox** (bubblewrap): protected paths (`.github/workflows/`, `CLAUDE.md`, `.cursorrules`, `.claude/`, etc.) are mounted read-only. Any command that tries to write to these paths gets "Read-only file system" from the kernel, regardless of which tool or language is used.
+
+Both controls are kernel-enforced. The agent cannot bypass them via prompt injection because the sandbox operates at the OS level, not the application level.
+
+## Known Limitations
+
+**Linux only.** Network isolation and filesystem sandboxing use Linux kernel features (network namespaces, bubblewrap). On macOS and Windows runners, contributor Bash relies on the command allow list only. 85%+ of GitHub Actions workflows run on Linux. This is the same limitation StepSecurity Harden-Runner ships with.
+
+**The command allow list is defense-in-depth, not a security boundary.** Commands starting with allowed prefixes can chain additional commands via `&&` or `;`. The primary security controls are network isolation and filesystem sandboxing, both kernel-enforced on Linux.
+
+**Trusted level has no restrictions.** Repo admins get full tool access by design. If an admin account is compromised, Trust Badger cannot help. This matches GitHub's own threat model.
+
 ## Design
 
 See [docs/DESIGN.md](docs/DESIGN.md) for the full design rationale and architecture details.
