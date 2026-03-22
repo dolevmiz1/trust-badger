@@ -6,7 +6,7 @@
 
 > Your CI/CD pipeline trusts AI agents. Trust Badger makes sure that trust isn't misplaced.
 
-Context-aware runtime enforcement for AI agents in CI/CD. Detects who triggered the workflow, assigns a trust level, and enforces tool policies through an MCP proxy with kernel-level sandboxing. Fork PRs get read-only tools. Contributors get an allow list with no network. Admins get full access.
+Context-aware runtime enforcement for AI agents in CI/CD. Detects who triggered the workflow, assigns a trust level, and enforces tool policies through an MCP proxy with kernel-level sandboxing on Linux. Fork PRs get read-only tools. Contributors get a Bash allow list with network isolation and filesystem protection. Admins get full access.
 
 ## The Problem
 
@@ -31,9 +31,9 @@ The agent thinks it has full access. The proxy decides what actually gets throug
 
 | Level | Who | What the agent can do |
 |-------|-----|----------------------|
-| **Untrusted** | Fork PRs, first-time contributors, triage permission | Read, search, browse only. No Bash, no file writes. |
-| **Contributor** | Read/write collaborators, bots | Allowed commands only (npm test, node, python, etc). No network access. Protected paths (.github/workflows/, CLAUDE.md, .cursorrules) are read-only. |
-| **Trusted** | Repo admins only | Everything. No restrictions. |
+| **Untrusted** | Fork PRs, first-time contributors, read/triage permission | Read, Glob, Grep only. No Bash, no Write, no Edit. |
+| **Contributor** | Write/maintain collaborators, bots (admin bots capped here) | All tools available. Bash restricted to allow list (npm test, node, python, etc). On Linux: no network, protected paths read-only. Write/Edit available but config files (.github/workflows/, CLAUDE.md, .cursorrules) blocked. |
+| **Trusted** | Repo admins only (human). Schedule events. | Everything. No restrictions. |
 
 ## Quick Start
 
@@ -42,7 +42,7 @@ steps:
   - uses: dolevmiz1/trust-badger@v7
     id: badger
     with:
-      mode: audit
+      mode: audit  # both modes block violations; enforce also fails the job
 
   - uses: anthropics/claude-code-action@v1
     with:
@@ -52,6 +52,8 @@ steps:
         --allowedTools 'mcp__trust-badger__*'
         --disallowedTools '${{ steps.badger.outputs.disallowed-tools }}'
 ```
+
+**About `mode`:** Both `audit` and `enforce` block denied tool calls. The difference: `enforce` also fails the GitHub Actions job. `audit` blocks the call and logs it, but lets the job complete. Start with `audit` to see what gets blocked without failing your CI.
 
 ## Proven in Real GitHub Actions
 
@@ -83,7 +85,7 @@ Shows the complete chain: fork detected, untrusted assigned, bubblewrap installe
 
 ## What It Catches
 
-**Clinejection:** Input scanning detects the fake error. Runtime enforcement blocks Bash for untrusted actors. Network isolation blocks exfiltration even for contributors. Three layers, any one is enough.
+**Clinejection:** Input scanning detects the fake error. Runtime enforcement blocks Bash for untrusted actors. Network isolation blocks exfiltration even for contributors. Three independent layers.
 
 **Hackerbot Claw:** Fork PR = untrusted. Agent gets read-only tools. Cannot push code, modify CODEOWNERS, or edit CLAUDE.md.
 
@@ -108,19 +110,19 @@ Shows the complete chain: fork detected, untrusted assigned, bubblewrap installe
 
 ## Security Model
 
-Trust Badger provides 5 layers of defense. Each is independent.
+Trust Badger provides defense-in-depth through multiple layers. Each is independent.
 
 **Layer 1: Input Scanning (early warning, not a security boundary)**
 
-Regex patterns detect known attack signatures (Clinejection, PromptPwnd, RoguePilot) in PR titles, bodies, commit messages, and dispatch payloads. This is a heuristic layer. Novel patterns or obfuscated variants will bypass it. This layer provides visibility and catches blatant injection attempts in tool arguments, but it is not the security boundary.
+Regex patterns detect known attack signatures (Clinejection, PromptPwnd, RoguePilot) in PR titles, bodies, branch names, commit messages, issue bodies, comments, and dispatch payloads. This is a heuristic layer. Novel patterns or obfuscated variants will bypass it. This layer provides visibility and catches blatant injection attempts in tool arguments, but it is not the security boundary.
 
 **Layers 2-5: Deterministic Enforcement (the security boundary)**
 
 These layers do not depend on parsing attacker content:
 - **Trust Detection**: fork PR = untrusted. Admin = trusted. Based on GitHub API, not input content. Not bypassable by prompt injection.
 - **Policy Engine**: untrusted actors don't have Bash in their tool list. Contributors get an allow list. No amount of prompt crafting changes this.
-- **Network Isolation** (Linux): kernel network namespace. No internet. Not bypassable.
-- **Filesystem Sandbox** (Linux): bubblewrap read-only mounts. Kernel-enforced. Not bypassable.
+- **Network Isolation** (Linux, contributor level): kernel network namespace. No internet. Not bypassable.
+- **Filesystem Sandbox** (Linux, contributor level): bubblewrap read-only mounts. Kernel-enforced. Not bypassable.
 
 The agent cannot bypass Layers 2-5 via prompt injection because these layers operate at the OS/API level, not the application level.
 
@@ -128,23 +130,21 @@ The agent cannot bypass Layers 2-5 via prompt injection because these layers ope
 
 ## Known Limitations
 
-**Linux only.** Network isolation and filesystem sandboxing use Linux kernel features (network namespaces, bubblewrap). On macOS and Windows runners, contributor Bash relies on the command allow list only. 85%+ of GitHub Actions workflows run on Linux. This is the same limitation StepSecurity Harden-Runner ships with.
+**Network isolation and filesystem sandboxing are Linux only.** These features use Linux kernel features (network namespaces, bubblewrap). On macOS and Windows runners, contributor Bash relies on the command allow list only.
 
-**The command allow list is defense-in-depth, not a security boundary.** Commands starting with allowed prefixes can chain additional commands via `&&` or `;`. The primary security controls are network isolation and filesystem sandboxing, both kernel-enforced on Linux.
+**The command allow list is defense-in-depth, not a security boundary.** Commands starting with allowed prefixes can chain additional commands via `&&` or `;`. On Linux, network isolation and filesystem sandboxing catch what the allow list misses. On non-Linux, the allow list is the only Bash restriction for contributors.
 
-**Trusted level has no restrictions.** Repo admins get full tool access by design. If an admin account is compromised, Trust Badger cannot help. This matches GitHub's own threat model.
+**Trusted level has no restrictions.** Repo admins and schedule events get full tool access by design. If an admin account is compromised, Trust Badger cannot help.
 
 ## Why Not Rely on the LLM Alone?
 
 We tested what happens WITHOUT Trust Badger. A fork PR with a Clinejection-style payload was submitted to a vulnerable workflow running `claude-code-action` with `allowed_non_write_users: "*"`, `pull_request_target` (exposes secrets to forks), and full Bash access.
 
-In this test, the malicious commands were not executed. The `claude-code-action` posted a comment identifying the attack. Whether this was caught by Claude's safety training, Anthropic's input sanitization in the action wrapper, or both is unclear.
-
-But this does not mean the threat is solved:
+In this test, the malicious commands were not executed and a comment was posted identifying the attack. However, this does not mean the threat is solved:
 
 - The real Clinejection attack (Feb 2026) used the same `claude-code-action` and succeeded in tricking Claude into running `npm install` from a malicious fork, leading to secret exfiltration and a supply chain compromise affecting 5M+ users.
 - LLM behavior is non-deterministic. A different payload, model version, or prompt structure might bypass the safety layer. Anthropic's own post-incident fixes prove the previous version was vulnerable.
-- Trust Badger provides **deterministic** enforcement at the transport layer. It does not depend on the LLM's judgment. Tools are blocked by kernel-level sandboxing, not by hoping the model refuses.
+- Trust Badger's enforcement layers (2-5) are deterministic. They do not depend on the LLM's judgment. Tools are blocked by policy, network isolation, and filesystem sandboxing at the OS level.
 
 ## Design
 
