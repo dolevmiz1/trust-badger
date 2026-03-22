@@ -164,21 +164,47 @@ jobs:
 
       - name: Verify fork PR gets untrusted trust level
         run: |
-          GITHUB_EVENT_PATH=/tmp/fake-fork-event.json \
-          GITHUB_EVENT_NAME=pull_request \
-          GITHUB_ACTOR=attacker \
-          GITHUB_TRIGGERING_ACTOR=attacker \
-          GITHUB_REPOSITORY=dolevmiz1/trust-badger \
-          RUNNER_TEMP=$RUNNER_TEMP \
-          node src/setup.js 2>&1 | tee /tmp/setup-output.txt
+          # Override the real event file with our fake fork PR payload
+          cp /tmp/fake-fork-event.json "$GITHUB_EVENT_PATH"
 
-          if grep -q "Trust level: untrusted" /tmp/setup-output.txt; then
-            echo "PASS: Fork PR correctly assigned untrusted"
-          else
-            echo "FAIL: Expected untrusted trust level"
-            cat /tmp/setup-output.txt
-            exit 1
-          fi
+          # Run the trust detection directly via Node with mocked context
+          node -e "
+            // Mock core
+            const logs = [];
+            require.cache[require.resolve('@actions/core')] = {
+              id: 'core', filename: 'core', loaded: true,
+              exports: {
+                info: m => { console.log(m); logs.push(m); },
+                warning: m => console.log('WARN:', m),
+                setFailed: m => console.log('FAIL:', m),
+                getInput: () => '', setOutput: () => {},
+              },
+            };
+
+            // Set env for fork PR context
+            process.env.GITHUB_EVENT_NAME = 'pull_request';
+            process.env.GITHUB_ACTOR = 'attacker';
+            process.env.GITHUB_TRIGGERING_ACTOR = 'attacker';
+
+            const { detectTrustLevel } = require('./src/setup');
+
+            const context = {
+              payload: JSON.parse(require('fs').readFileSync('/tmp/fake-fork-event.json', 'utf-8')),
+              repo: { owner: 'dolevmiz1', repo: 'trust-badger' },
+            };
+            const mockOctokit = {
+              rest: { repos: { getCollaboratorPermissionLevel: async () => { throw new Error('not a collaborator'); } } }
+            };
+
+            detectTrustLevel(mockOctokit, context).then(level => {
+              console.log('Trust level:', level);
+              if (level !== 'untrusted') {
+                console.log('FAIL: Expected untrusted, got', level);
+                process.exit(1);
+              }
+              console.log('PASS: Fork PR correctly assigned untrusted');
+            });
+          "
 
   # Job 4: Claude integration (optional, may 402 with mock key)
   claude-integration:
