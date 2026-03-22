@@ -61,7 +61,7 @@ All CI jobs pass, including a live Claude Code integration and real fork PR enfo
 
 **Real fork PR enforcement proven:** A fork PR from a different account was correctly assigned `untrusted` trust level with all write tools blocked.
 
-![Fork PR Untrusted](docs/diagrams/fork-pr-untrusted.png)
+![Fork PR Untrusted](docs/diagrams/trust-level-untrusted.png)
 
 <details>
 <summary>Proxy integration test logs</summary>
