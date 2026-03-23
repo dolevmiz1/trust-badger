@@ -39,7 +39,7 @@ The agent thinks it has full access. The proxy decides what actually gets throug
 
 ```yaml
 steps:
-  - uses: dolevmiz1/trust-badger@v7
+  - uses: dolevmiz1/trust-badger@v8
     id: badger
     with:
       mode: audit  # both modes block violations; enforce also fails the job
